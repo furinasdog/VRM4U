@@ -772,7 +772,7 @@ bool VRMConverter::ConvertTextureAndMaterial(UVrmAssetListObject *vrmAssetList) 
 	} // texture
 
 	TArray<FString> pmxTexNameList;
-	TMap<FString, UTexture2D*> PmxSphereTextures;
+	TMap<FString, UTexture2D*> PmxAuxiliaryTextures;
 	if (Options::Get().IsPMXModel()) {
 		TArray<UTexture2D*> texArray;
 
@@ -812,24 +812,27 @@ bool VRMConverter::ConvertTextureAndMaterial(UVrmAssetListObject *vrmAssetList) 
 			}
 		}
 
-		// Append authored sphere maps after diffuse textures so their indices stay unchanged.
-		for (int32_t iMat = 0; iMat < MatNum; ++iMat) {
-			auto& aiMat = *aiData->mMaterials[iMat];
-			aiString SpherePath;
-			if (!ReadPmxMaterialProperties(aiMat).SphereMode || aiMat.GetTexture(aiTextureType_REFLECTION, 0, &SpherePath) != AI_SUCCESS) continue;
-			const FString RelativePath = UTF8_TO_TCHAR(SpherePath.C_Str());
-			if (PmxSphereTextures.Contains(RelativePath)) continue;
+		// Append auxiliary maps after diffuse textures to preserve the source indices.
+		const auto LoadPmxTexture = [&](const aiString& Path) {
+			const FString RelativePath = UTF8_TO_TCHAR(Path.C_Str());
+			if (PmxAuxiliaryTextures.Contains(RelativePath)) return;
 			const FString Directory = FPaths::ConvertRelativePathToFull(FPaths::GetPath(vrmAssetList->FileFullPathName));
 			FString FullPath = FPaths::ConvertRelativePathToFull(Directory / RelativePath);
 			FPaths::CollapseRelativeDirectories(FullPath);
-			if (!FPaths::IsUnderDirectory(FullPath, Directory)) continue;
+			if (!FPaths::IsUnderDirectory(FullPath, Directory)) return;
 			TArray<uint8> Bytes;
-			if (!FFileHelper::LoadFileToArray(Bytes, *FullPath)) continue;
-			const FString Name = TEXT("T_PmxSphere_") + FString::FromInt(iMat);
+			if (!FFileHelper::LoadFileToArray(Bytes, *FullPath)) return;
+			const FString Name = TEXT("T_PmxAux_") + FString::FromInt(PmxAuxiliaryTextures.Num());
 			auto* Texture = VRMLoaderUtil::CreateTextureFromImage(Name, vrmAssetList->Package, Bytes.GetData(), Bytes.Num(), bGenerateMips);
-			if (!IsValid(Texture)) continue;
-			PmxSphereTextures.Add(RelativePath, Texture);
+			if (!IsValid(Texture)) return;
+			PmxAuxiliaryTextures.Add(RelativePath, Texture);
 			texArray.Add(Texture);
+		};
+		for (int32_t iMat = 0; iMat < MatNum; ++iMat) {
+			auto& aiMat = *aiData->mMaterials[iMat];
+			aiString Path;
+			if (ReadPmxMaterialProperties(aiMat).SphereMode && aiMat.GetTexture(aiTextureType_REFLECTION, 0, &Path) == AI_SUCCESS) LoadPmxTexture(Path);
+			if (aiMat.Get("$tex.mmd.toonPath", 0, 0, Path) == AI_SUCCESS) LoadPmxTexture(Path);
 		}
 		vrmAssetList->Textures = texArray;
 	}
@@ -1231,9 +1234,15 @@ bool VRMConverter::ConvertTextureAndMaterial(UVrmAssetListObject *vrmAssetList) 
 							LocalVectorParameterSet(dm, TEXT("mmd_EdgeColor"), pmx.EdgeColor);
 							aiString SpherePath;
 							if (pmx.SphereMode && aiMat.GetTexture(aiTextureType_REFLECTION, 0, &SpherePath) == AI_SUCCESS) {
-								if (auto* Texture = PmxSphereTextures.Find(UTF8_TO_TCHAR(SpherePath.C_Str()))) {
+								if (auto* Texture = PmxAuxiliaryTextures.Find(UTF8_TO_TCHAR(SpherePath.C_Str()))) {
 									LocalTextureSet(dm, TEXT("mmd_SphereTexture"), *Texture);
 									LocalScalarParameterSet(dm, TEXT("mmd_SphereMode"), static_cast<float>(pmx.SphereMode));
+								}
+							}
+							aiString ToonPath;
+							if (aiMat.Get("$tex.mmd.toonPath", 0, 0, ToonPath) == AI_SUCCESS) {
+								if (auto* Texture = PmxAuxiliaryTextures.Find(UTF8_TO_TCHAR(ToonPath.C_Str()))) {
+									LocalTextureSet(dm, TEXT("mmd_ToonTexture"), *Texture);
 								}
 							}
 							// PMX opacity also controls hidden expression and clothing layers.
