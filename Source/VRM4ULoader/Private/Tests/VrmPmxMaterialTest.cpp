@@ -30,6 +30,13 @@ bool FVrmPmxMaterialTest::RunTest(const FString& Parameters)
 	Material.AddProperty(&EdgeColor, 1, "$mat.mmd.edgeColor", 0, 0);
 	TestEqual(TEXT("Authored outline size survives"), ReadPmxMaterialProperties(Material).EdgeSize, EdgeSize);
 	TestEqual(TEXT("Authored outline color survives"), ReadPmxMaterialProperties(Material).EdgeColor, FLinearColor(0.1f, 0.2f, 0.3f, 0.4f));
+	TestEqual(TEXT("Missing sphere map is disabled"), ReadPmxMaterialProperties(Material).SphereMode, 0);
+	for (int Mode : {0, 1, 2, 3, -1})
+	{
+		Material.AddProperty(&Mode, 1, "$mat.mmd.sphereMode", 0, 0);
+		TestEqual(TEXT("Only supported sphere blend modes are exposed"), ReadPmxMaterialProperties(Material).SphereMode,
+			Mode == 1 || Mode == 2 ? Mode : 0);
+	}
 	return true;
 }
 #endif

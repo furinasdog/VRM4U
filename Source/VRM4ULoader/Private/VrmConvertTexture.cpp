@@ -772,6 +772,7 @@ bool VRMConverter::ConvertTextureAndMaterial(UVrmAssetListObject *vrmAssetList) 
 	} // texture
 
 	TArray<FString> pmxTexNameList;
+	TMap<FString, UTexture2D*> PmxSphereTextures;
 	if (Options::Get().IsPMXModel()) {
 		TArray<UTexture2D*> texArray;
 
@@ -809,6 +810,26 @@ bool VRMConverter::ConvertTextureAndMaterial(UVrmAssetListObject *vrmAssetList) 
 
 				texArray.Push(NewTexture2D);
 			}
+		}
+
+		// Append authored sphere maps after diffuse textures so their indices stay unchanged.
+		for (int32_t iMat = 0; iMat < MatNum; ++iMat) {
+			auto& aiMat = *aiData->mMaterials[iMat];
+			aiString SpherePath;
+			if (!ReadPmxMaterialProperties(aiMat).SphereMode || aiMat.GetTexture(aiTextureType_REFLECTION, 0, &SpherePath) != AI_SUCCESS) continue;
+			const FString RelativePath = UTF8_TO_TCHAR(SpherePath.C_Str());
+			if (PmxSphereTextures.Contains(RelativePath)) continue;
+			const FString Directory = FPaths::ConvertRelativePathToFull(FPaths::GetPath(vrmAssetList->FileFullPathName));
+			FString FullPath = FPaths::ConvertRelativePathToFull(Directory / RelativePath);
+			FPaths::CollapseRelativeDirectories(FullPath);
+			if (!FPaths::IsUnderDirectory(FullPath, Directory)) continue;
+			TArray<uint8> Bytes;
+			if (!FFileHelper::LoadFileToArray(Bytes, *FullPath)) continue;
+			const FString Name = TEXT("T_PmxSphere_") + FString::FromInt(iMat);
+			auto* Texture = VRMLoaderUtil::CreateTextureFromImage(Name, vrmAssetList->Package, Bytes.GetData(), Bytes.Num(), bGenerateMips);
+			if (!IsValid(Texture)) continue;
+			PmxSphereTextures.Add(RelativePath, Texture);
+			texArray.Add(Texture);
 		}
 		vrmAssetList->Textures = texArray;
 	}
@@ -1208,6 +1229,13 @@ bool VRMConverter::ConvertTextureAndMaterial(UVrmAssetListObject *vrmAssetList) 
 							LocalScalarParameterSet(dm, TEXT("mmd_EdgeEnabled"), pmx.bEdgeEnabled ? 1.f : 0.f);
 							LocalScalarParameterSet(dm, TEXT("mmd_EdgeSize"), pmx.EdgeSize);
 							LocalVectorParameterSet(dm, TEXT("mmd_EdgeColor"), pmx.EdgeColor);
+							aiString SpherePath;
+							if (pmx.SphereMode && aiMat.GetTexture(aiTextureType_REFLECTION, 0, &SpherePath) == AI_SUCCESS) {
+								if (auto* Texture = PmxSphereTextures.Find(UTF8_TO_TCHAR(SpherePath.C_Str()))) {
+									LocalTextureSet(dm, TEXT("mmd_SphereTexture"), *Texture);
+									LocalScalarParameterSet(dm, TEXT("mmd_SphereMode"), static_cast<float>(pmx.SphereMode));
+								}
+							}
 							// PMX opacity also controls hidden expression and clothing layers.
 							LocalVectorParameterSet(dm, TEXT("mtoon_Color"), color);
 							LocalVectorParameterSet(dm, TEXT("gltf_basecolor"), color);

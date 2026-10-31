@@ -8,7 +8,9 @@ PMX LOD0 explicitly keeps 100% of source vertices and triangles. UE 5.8's defaul
 
 The bundled Assimp fork exports the PMX two-sided flag through `AI_MATKEY_TWOSIDED`, and outline settings through `$mat.mmd.edgeEnabled`, `$mat.mmd.edgeSize`, and `$mat.mmd.edgeColor`. VRM4U exposes outline settings as `mmd_EdgeEnabled`, `mmd_EdgeSize`, and `mmd_EdgeColor` material parameters. Its normal material selection preserves source culling unless the caller explicitly requests force-two-sided.
 
-The PMX parser is unchanged. HonkaiRendering uses the existing loader and uploads its runtime PMX textures before display. Per-vertex PMX edge scale and sphere/toon texture interpretation are not added by this patch.
+The PMX parser is unchanged. HonkaiRendering uses the existing loader and uploads its runtime PMX textures before display. Per-vertex PMX edge scale and toon texture interpretation are not added by this patch.
+
+PMX sphere maps in multiply/add modes (1/2) are exported as Assimp reflection textures with `$mat.mmd.sphereMode`. VRM4U exposes `mmd_SphereTexture` and `mmd_SphereMode`, reusing its image decoder and appending these textures after diffuse textures to preserve existing indices. Missing/undecodable sphere textures are ignored; sphere paths must stay within the PMX directory. Extra-UV mode 3 is intentionally unsupported. Geometry, skinning and PMX parsing are unchanged.
 
 ## Assimp source and rebuild
 
