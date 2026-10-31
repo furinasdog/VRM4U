@@ -1,0 +1,5 @@
+[submodule "ThirdParty/assimp-source"]
+	path = ThirdParty/assimp-source
+	url = https://github.com/furinasdog/assimp.git
+	branch = honkai-rendering/pmx-materials
+	update = none

@@ -30,3 +30,9 @@
 *.exe
 *.out
 *.app
+
+# Local Unreal build products; bundled ThirdParty libraries remain tracked.
+/Binaries/
+/Intermediate/
+__pycache__/
+*.pyc

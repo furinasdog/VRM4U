@@ -967,6 +967,12 @@ bool VRMConverter::ConvertModel(UVrmAssetListObject *vrmAssetList) {
 
 		if (sk->GetLODInfo(0) == nullptr) {
 			FSkeletalMeshLODInfo& info = sk->AddLODInfo();
+			if (Options::Get().IsPMXModel()) {
+				// LOD0 must preserve the PMX; UE defaults otherwise reduce it by 50%.
+				info.ReductionSettings.NumOfTrianglesPercentage = 1.f;
+				info.ReductionSettings.NumOfVertPercentage = 1.f;
+				info.ReductionSettings.MaxDeviationPercentage = 0.f;
+			}
 		}
 
 		bool bHasNormals = aiData->mNumMeshes > 0;

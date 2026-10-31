@@ -1,6 +1,7 @@
 // VRM4U Copyright (c) 2021-2026 Haruyoshi Yamamoto. This software is released under the MIT License.
 
 #include "VrmConvertTexture.h"
+#include "VrmPmxMaterial.h"
 #include "VrmConvert.h"
 #include "VrmUtil.h"
 
@@ -1201,6 +1202,20 @@ bool VRMConverter::ConvertTextureAndMaterial(UVrmAssetListObject *vrmAssetList) 
 					// mtoon
 					if (bMToon || VRMConverter::Options::Get().IsVRM10Model()) {
 						createAndAddMaterial(dm, iMat, vrmAssetList, this, TextureTypeToIndex);
+						if (Options::Get().IsPMXModel()) {
+							const auto pmx = ReadPmxMaterialProperties(aiMat);
+							const FLinearColor color = pmx.Color;
+							LocalScalarParameterSet(dm, TEXT("mmd_EdgeEnabled"), pmx.bEdgeEnabled ? 1.f : 0.f);
+							LocalScalarParameterSet(dm, TEXT("mmd_EdgeSize"), pmx.EdgeSize);
+							LocalVectorParameterSet(dm, TEXT("mmd_EdgeColor"), pmx.EdgeColor);
+							// PMX opacity also controls hidden expression and clothing layers.
+							LocalVectorParameterSet(dm, TEXT("mtoon_Color"), color);
+							LocalVectorParameterSet(dm, TEXT("gltf_basecolor"), color);
+							if (color.A < 1.f) {
+								dm->BasePropertyOverrides.bOverride_BlendMode = true;
+								dm->BasePropertyOverrides.BlendMode = BLEND_Translucent;
+							}
+						}
 
 						if (matFlagOpaqueArray.IsValidIndex(iMat)) {
 							if (matFlagOpaqueArray[iMat]) {
