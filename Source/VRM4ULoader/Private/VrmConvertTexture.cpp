@@ -1232,6 +1232,7 @@ bool VRMConverter::ConvertTextureAndMaterial(UVrmAssetListObject *vrmAssetList) 
 							LocalScalarParameterSet(dm, TEXT("mmd_EdgeEnabled"), pmx.bEdgeEnabled ? 1.f : 0.f);
 							LocalScalarParameterSet(dm, TEXT("mmd_EdgeSize"), pmx.EdgeSize);
 							LocalVectorParameterSet(dm, TEXT("mmd_EdgeColor"), pmx.EdgeColor);
+							LocalScalarParameterSet(dm, TEXT("mmd_ToonEnabled"), pmx.bToonEnabled ? 1.f : 0.f);
 							aiString SpherePath;
 							if (pmx.SphereMode && aiMat.GetTexture(aiTextureType_REFLECTION, 0, &SpherePath) == AI_SUCCESS) {
 								if (auto* Texture = PmxAuxiliaryTextures.Find(UTF8_TO_TCHAR(SpherePath.C_Str()))) {

@@ -8,6 +8,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVrmPmxMaterialTest, "VRM4U.PMX.MaterialColorAn
 bool FVrmPmxMaterialTest::RunTest(const FString& Parameters)
 {
 	aiMaterial Material;
+	TestTrue(TEXT("Legacy imports retain fallback toon lighting"), ReadPmxMaterialProperties(Material).bToonEnabled);
 	TestEqual(TEXT("Missing properties stay white and opaque"), ReadPmxMaterialProperties(Material).Color, FLinearColor::White);
 	aiColor3D Diffuse(0.2f, 0.4f, 0.6f);
 	Material.AddProperty(&Diffuse, 1, AI_MATKEY_COLOR_DIFFUSE);
@@ -21,6 +22,8 @@ bool FVrmPmxMaterialTest::RunTest(const FString& Parameters)
 	{
 		Material.AddProperty(&Enabled, 1, AI_MATKEY_TWOSIDED);
 		Material.AddProperty(&Enabled, 1, "$mat.mmd.edgeEnabled", 0, 0);
+		Material.AddProperty(&Enabled, 1, "$mat.mmd.toonEnabled", 0, 0);
+		TestEqual(TEXT("Authored toon switch survives"), ReadPmxMaterialProperties(Material).bToonEnabled, Enabled != 0);
 		TestEqual(TEXT("Authored culling survives"), ReadPmxMaterialProperties(Material).bTwoSided, Enabled != 0);
 		TestEqual(TEXT("Authored outline switch survives"), ReadPmxMaterialProperties(Material).bEdgeEnabled, Enabled != 0);
 	}

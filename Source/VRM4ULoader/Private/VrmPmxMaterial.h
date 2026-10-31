@@ -11,6 +11,7 @@ struct FPmxMaterialProperties
 	int SphereMode = 0;
 	bool bTwoSided = false;
 	bool bEdgeEnabled = false;
+	bool bToonEnabled = true;
 };
 
 inline FPmxMaterialProperties ReadPmxMaterialProperties(const aiMaterial& Material)
@@ -23,6 +24,7 @@ inline FPmxMaterialProperties ReadPmxMaterialProperties(const aiMaterial& Materi
 	Result.Color = FLinearColor(Diffuse.r, Diffuse.g, Diffuse.b, FMath::Clamp(Opacity, 0.f, 1.f));
 	Material.Get(AI_MATKEY_TWOSIDED, Result.bTwoSided);
 	Material.Get("$mat.mmd.edgeEnabled", 0, 0, Result.bEdgeEnabled);
+	Material.Get("$mat.mmd.toonEnabled", 0, 0, Result.bToonEnabled);
 	Material.Get("$mat.mmd.edgeSize", 0, 0, Result.EdgeSize);
 	aiColor4D EdgeColor(0.f, 0.f, 0.f, 1.f);
 	Material.Get("$mat.mmd.edgeColor", 0, 0, EdgeColor);

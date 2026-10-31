@@ -14,6 +14,8 @@ PMX sphere maps in multiply/add modes (1/2) are exported as Assimp reflection te
 
 Custom PMX toon texture paths are exported through `$tex.mmd.toonPath` and decoded into `mmd_ToonTexture`. Toon and sphere images share the same path validation, decoder and deduplication cache; diffuse indices remain unchanged. Built-in shared toon indices have no file and are left to the consuming renderer's fallback. The viewer samples the authored vertical gradient; the loader does not recolor it.
 
+`$mat.mmd.toonEnabled` / `mmd_ToonEnabled` distinguishes an authored disabled toon slot (custom index -1) from a missing custom file or built-in shared toon. A disabled slot must not receive the viewer's fallback toon shadow; sphere effects remain independent. Older imports without the property retain fallback lighting. The material property test covers both enabled and disabled states.
+
 ## Assimp source and rebuild
 
 `ThirdParty/assimp-source` pins [the Assimp fork](https://github.com/furinasdog/assimp), based on `ruyo/assimp` commit `06c4e29a3c873648a107de9c1ac50f687b4d50d8` (6.0.2), matching the original bundled DLL revision. Its BSD license and existing dependency notices are retained. Windows x64 DLL/import-library filenames remain compatible with VRM4U's build rules.
