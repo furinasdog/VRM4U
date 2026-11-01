@@ -37,6 +37,10 @@ Use a native Ninja executable. Upstream warnings remain visible; warnings-as-err
 
 Validation: `VRM4U.PMX.MaterialColorAndOpacity` checks diffuse, hidden/fractional opacity, culling, and outline properties. Load actual PMX models and compare source/Assimp/UE face counts and material attributes; property tests alone do not prove import fidelity. Project smoke checks and visual results are recorded in the parent project.
 
+## VTuber runtime morph metadata
+
+UE 5.8 editor binaries running with `-game` have `WITH_EDITOR=1` but no `GEditor`. `USkeleton::AccumulateCurveMetaData` creates new metadata through a default-enabled undo transaction, which dereferences `GEditor`. Runtime morph conversion now calls `AddCurveMetaData(name, false)` and sets the morph flag explicitly. Existing metadata, morph registration, mesh rebuilding, and older UE version paths are retained. `VRM4U.PMX.RuntimeMorphMetadata` is a client-context Automation regression: run it with `-game -nullrhi` and verify that its runtime/GEditor-null assertions pass; an editor-context test does not verify this case. The test covers metadata creation and repeat registration, not GPU deformation.
+
 
 ## Runtime PMX physics and animation safety
 

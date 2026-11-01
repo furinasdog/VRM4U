@@ -160,6 +160,14 @@ bool VRMConverter::NormalizeBoneName(const aiScene *mScenePtr) {
 				auto str = VRMUtil::MakeName(UTF8_TO_TCHAR(meta->colliderGroups[c].node_name.C_Str()), true);
 				meta->colliderGroups[c].node_name = TCHAR_TO_UTF8(*str);
 			}
+			if (meta->pmxRigidBodies) {
+				for (int b = 0; b < meta->pmxRigidBodyNum; ++b) {
+					auto& name = meta->pmxRigidBodies[b].boneName;
+					if (name.length == 0) continue;
+					const FString str = VRMUtil::MakeName(UTF8_TO_TCHAR(name.C_Str()), true);
+					name = TCHAR_TO_UTF8(*str);
+				}
+			}
 		}
 	}
 
@@ -237,6 +245,68 @@ bool VRMConverter::NormalizeBoneName(const aiScene *mScenePtr) {
 	return true;
 	*/
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Misc/AutomationTest.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVrmPmxBoneNameTest, "VRM4U.PMX.PhysicsBoneNameNormalization",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVrmPmxBoneNameTest::RunTest(const FString& Parameters) {
+	const FString Original = TEXT("左肩+");
+	const FString Normalized = VRMUtil::MakeName(Original, true);
+	TestNotEqual(TEXT("The fixture exercises a sanitized joint name"), Normalized, Original);
+	for (const bool bForceOriginal : {false, true}) {
+		FImportOptionData ImportOptions;
+		ImportOptions.bForceOriginalBoneName = bForceOriginal;
+		VRMConverter::Options Options;
+		Options.SetVrmOption(&ImportOptions);
+		VRMConverter::Options::Scope Scope(Options);
+		auto Meta = MakeUnique<VRM::VRMMetadata>();
+		auto Scene = MakeUnique<aiScene>();
+		auto RootNode = MakeUnique<aiNode>();
+		auto BoneNode = MakeUnique<aiNode>();
+		auto Mesh = MakeUnique<aiMesh>();
+		auto SkinBone = MakeUnique<aiBone>();
+		TUniquePtr<VRM::VRMPmxRigidBody[]> Bodies(new VRM::VRMPmxRigidBody[2]);
+		aiNode* Children[]{BoneNode.Get()};
+		aiMesh* Meshes[]{Mesh.Get()};
+		aiBone* SkinBones[]{SkinBone.Get()};
+		RootNode->mName = "root";
+		RootNode->mNumChildren = 1;
+		RootNode->mChildren = Children;
+		BoneNode->mParent = RootNode.Get();
+		BoneNode->mName = TCHAR_TO_UTF8(*Original);
+		Mesh->mNumBones = 1;
+		Mesh->mBones = SkinBones;
+		SkinBone->mName = TCHAR_TO_UTF8(*Original);
+		Meta->pmxRigidBodyNum = 2;
+		Meta->pmxRigidBodies = Bodies.Get();
+		Bodies[0].name = TCHAR_TO_UTF8(*Original);
+		Bodies[0].boneName = TCHAR_TO_UTF8(*Original);
+		Bodies[0].boneIndex = 7;
+		Scene->mRootNode = RootNode.Get();
+		Scene->mNumMeshes = 1;
+		Scene->mMeshes = Meshes;
+		Scene->mVRMMeta = Meta.Get();
+		const FString Label = FString::Printf(TEXT("ForceOriginalBoneName=%d"), bForceOriginal);
+		TestTrue(Label + TEXT(" normalizes the scene"), VRMConverter::NormalizeBoneName(Scene.Get()));
+		const FString Expected = bForceOriginal ? Original : Normalized;
+		TestEqual(Label + TEXT(" node follows the selected name rule"), FString(UTF8_TO_TCHAR(BoneNode->mName.C_Str())), Expected);
+		TestEqual(Label + TEXT(" skin bone uses the same name"), FString(UTF8_TO_TCHAR(SkinBone->mName.C_Str())), Expected);
+		TestEqual(Label + TEXT(" PMX physics refers to the same name"), FString(UTF8_TO_TCHAR(Bodies[0].boneName.C_Str())), Expected);
+		TestTrue(Label + TEXT(" PMX physics reference resolves to its node"), RootNode->FindNode(Bodies[0].boneName.C_Str()) == BoneNode.Get());
+		TestEqual(Label + TEXT(" source bone index is preserved"), Bodies[0].boneIndex, 7);
+		TestEqual(Label + TEXT(" rigid body display name is preserved"), FString(UTF8_TO_TCHAR(Bodies[0].name.C_Str())), Original);
+		TestTrue(Label + TEXT(" unbound body keeps an empty bone reference"), Bodies[1].boneName.length == 0);
+		// Assimp DLL destructors must not release UE-allocated objects or borrowed arrays.
+		Scene->mRootNode = nullptr; Scene->mMeshes = nullptr; Scene->mNumMeshes = 0; Scene->mVRMMeta = nullptr;
+		RootNode->mChildren = nullptr; RootNode->mNumChildren = 0;
+		Mesh->mBones = nullptr; Mesh->mNumBones = 0;
+		Meta->pmxRigidBodies = nullptr; Meta->pmxRigidBodyNum = 0;
+	}
+	return true;
+}
+#endif
 
 
 ////

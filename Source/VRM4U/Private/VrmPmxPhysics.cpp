@@ -142,7 +142,8 @@ struct FVrmPmxPhysics::FImpl
     {
         TArray<float> Matrices;
         Matrices.SetNumUninitialized(Indices.Num() * 16);
-        MMDBulletPhysicsGetRigidBodyMotionTransforms(Context, Indices.Num(), Indices.GetData(), Matrices.GetData());
+        // Position correction writes the current simulation body, so its source snapshot must use the same time.
+        MMDBulletPhysicsGetRigidBodyWorldTransforms(Context, Indices.Num(), Indices.GetData(), Matrices.GetData());
         Result.SetNum(Indices.Num());
         for (int32 I = 0; I < Indices.Num(); ++I)
             if (!ReadNative(Matrices.GetData() + I * 16, Result[I])) return false;
@@ -530,15 +531,17 @@ bool FVrmPmxMode2ParentTest::RunTest(const FString& Parameters)
                     const FTransform NativeBone = Physics.Impl->BoneFromBody(I, Bodies[I], World);
                     TestTrue(TEXT("Native body position and output bone agree after parent-chain alignment"), NativeBone.GetLocation().Equals(Pose[I + 1].GetLocation(), .001));
                 }
-                Pose = Animated;
-                if (!TestTrue(TEXT("A real fixed step retains mode2 parent-chain attachment"), Physics.Simulate(1.f / 60.f, World, Pose, Error))) return false;
-                TestTrue(TEXT("Stepped mode2 child retains its animated local position under the physical parent"),
-                    Pose[2].GetRelativeTransform(Pose[1]).GetLocation().Equals(ChildLocal.GetLocation(), .001));
-                if (!Physics.Impl->ReadBodies(Physics.Impl->AllIndices, Bodies)) return false;
-                const FTransform SteppedChild = Physics.Impl->BoneFromBody(1, Bodies[1], World);
-                // The existing UMT motion-state ABI may differ by one gravity substep (0.28cm); a stale animated CS target differs by tens of cm.
-                TestTrue(TEXT("Stepped native mode2 body follows the resolved parent rather than the prephysics component position"),
-                    SteppedChild.GetLocation().Equals(Pose[2].GetLocation(), .5));
+                for (int32 Frame = 0; Frame < 30; ++Frame)
+                {
+                    Pose = Animated;
+                    if (!TestTrue(TEXT("A real fixed step retains mode2 parent-chain attachment"), Physics.Simulate(1.f / 60.f, World, Pose, Error))) return false;
+                    TestTrue(TEXT("Stepped mode2 child retains its animated local position under the physical parent"),
+                        Pose[2].GetRelativeTransform(Pose[1]).GetLocation().Equals(ChildLocal.GetLocation(), .001));
+                    if (!Physics.Impl->ReadBodies(Physics.Impl->AllIndices, Bodies)) return false;
+                    const FTransform SteppedChild = Physics.Impl->BoneFromBody(1, Bodies[1], World);
+                    TestTrue(TEXT("Current-world mode2 correction has no interpolated-snapshot position feedback"),
+                        SteppedChild.GetLocation().Equals(Pose[2].GetLocation(), .001));
+                }
             }
         }
 #else
