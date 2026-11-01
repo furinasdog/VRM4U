@@ -36,3 +36,16 @@ cmake --build build-assimp --parallel 8
 Use a native Ninja executable. Upstream warnings remain visible; warnings-as-errors is disabled for compatibility with newer MSVC. Close Unreal before replacing `ThirdParty/assimp/bin/x64/assimp-vc141-mt.dll` and `ThirdParty/assimp/lib/x64/Release/assimp-vc141-mt.lib` with the corresponding files from `build-assimp/bin` and `build-assimp/lib`. Rebuild the UE project normally, without Live Coding/hot reload.
 
 Validation: `VRM4U.PMX.MaterialColorAndOpacity` checks diffuse, hidden/fractional opacity, culling, and outline properties. Load actual PMX models and compare source/Assimp/UE face counts and material attributes; property tests alone do not prove import fidelity. Project smoke checks and visual results are recorded in the parent project.
+
+
+## Runtime PMX physics and animation safety
+
+The existing Assimp PMX reader additionally exports raw rigid bodies and joints. `UVrmPmxPhysicsData` retains the original modes, units, collision-mask bits, limits and springs. The raw mask is passed directly to Bullet; it must not be complemented. Finite damping values outside [0,1] are retained in metadata and clamped only when constructing native bodies, matching Bullet's own behavior.
+
+`FVrmPmxPhysics` is an optional Windows runtime adapter around unmodified UMTNativePlugin/Bullet. It consumes a full mesh-indexed component-space animated pose and returns the complete simulated pose, including descendants and mode-2 local-position handling under a physical parent. It does not convert PMX joints into VRM0 spring chains. It uses fixed60Hz steps, bounded catch-up, long-frame reset, scale checks, and finite/index validation. Unsupported joint types fail explicitly.
+
+The host prepares `Tools/UMTNativePlugin/build-static-ue144/bundled/UMTNativePlugin.lib` before building. VRM4U detects that optional archive relative to the host project; builds without it retain the importer and return an explicit unavailable-runtime error. Runtime data does not store pointers into the temporary Assimp scene. Use matching rebuilt Assimp headers, DLL and import library together after the metadata ABI extension.
+
+The VRM spring path also validates raw-to-compact bone indices. Runtime PMX vertex morph registration works without opening an editor transaction through a null GEditor. Host animation proxies must register the inherited VRM4U proxy pointer and initialize the entire reference pose before applying targets.
+
+Tests under `VRM4U.PMX` cover original material properties, physical metadata persistence, coordinate basis, gravity, collision groups, mode-2 parent chains and finite damping compatibility. Real-model image and motion evidence belongs to the host project; those unit checks do not establish collision-free appearance or official-game fidelity.

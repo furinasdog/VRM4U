@@ -23,6 +23,7 @@ namespace VRMSpringBone {
 
 		const auto RefSkeleton = Output.AnimInstanceProxy->GetSkeleton()->GetReferenceSkeleton();
 		const auto& RefSkeletonTransform = Output.Pose.GetPose().GetBoneContainer().GetRefPoseArray();
+		const auto& BoneContainer = Output.Pose.GetPose().GetBoneContainer();
 
 		const FTransform ComponentTransform = Output.AnimInstanceProxy->GetComponentTransform();
 		// モデルローカル座標
@@ -115,8 +116,7 @@ namespace VRMSpringBone {
 					FVector currentTail = ComponentToLocal.TransformPosition(sData.m_currentTail);
 					FVector prevTail = ComponentToLocal.TransformPosition(sData.m_prevTail);
 
-					int myBoneIndex = RefSkeleton.FindBoneIndex(sData.boneName);
-					if (myBoneIndex < 0) {
+					if (!RefSkeletonTransform.IsValidIndex(sData.boneIndex)) {
 						continue;
 					}
 
@@ -125,13 +125,10 @@ namespace VRMSpringBone {
 					}
 
 
-					int myParentBoneIndex = RefSkeleton.GetParentIndex(myBoneIndex);
-
 					//currentTransform = FTransform::Identity;
 					FQuat ParentRotation = FQuat::Identity;
 					if (chainCount == 0) {
-						FCompactPoseBoneIndex uu = Output.Pose.GetPose().GetBoneContainer().GetCompactPoseIndexFromSkeletonIndex(myBoneIndex);
-						//FCompactPoseBoneIndex uu(myBoneIndex);
+						FCompactPoseBoneIndex uu = BoneContainer.MakeCompactPoseIndex(FMeshPoseBoneIndex(sData.boneIndex));
 
 						if (Output.Pose.GetPose().IsValidIndex(uu) == false) {
 							continue;
@@ -284,6 +281,7 @@ namespace VRMSpringBone {
 		if (meta->VrmAssetListObject == nullptr) return;
 
 		skeletalMesh = VRMGetSkinnedAsset(Output.AnimInstanceProxy->GetSkelMeshComponent());
+		if (!skeletalMesh) return;
 		//skeletalMesh = meta->SkeletalMesh;
 		const FReferenceSkeleton& RefSkeleton = VRMGetRefSkeleton(skeletalMesh);
 		const auto& RefSkeletonTransform = Output.Pose.GetPose().GetBoneContainer().GetRefPoseArray();
@@ -302,14 +300,15 @@ namespace VRMSpringBone {
 			s.dragForce = metaS.dragForce;
 			s.hitRadius = metaS.hitRadius;
 
-			s.RootSpringData.SetNum(metaS.bones.Num());
+			const int32 RootCount = FMath::Min(metaS.bones.Num(), metaS.boneNames.Num());
+			s.RootSpringData.SetNum(RootCount);
 			for (int scount = 0; scount < s.RootSpringData.Num(); ++scount) {
 				s.RootSpringData[scount].boneName = *metaS.boneNames[scount];
 				s.RootSpringData[scount].boneIndex = RefSkeleton.FindBoneIndex(*metaS.boneNames[scount]);
 			}
 			// TODO add child
 
-			s.SpringDataChain.SetNum(metaS.bones.Num());
+			s.SpringDataChain.SetNum(RootCount);
 			for (int scount = 0; scount < s.RootSpringData.Num(); ++scount) {
 				auto& chain = s.SpringDataChain[scount];
 
@@ -334,6 +333,7 @@ namespace VRMSpringBone {
 					}
 				}
 
+				if (chain.IsEmpty()) continue;
 				// child
 				if (1) {
 					for (int chainCount = 0; chainCount < 100; ++chainCount) {
@@ -380,22 +380,12 @@ namespace VRMSpringBone {
 						//for (auto& sData : root) {
 						auto& sData = root[ChildCount];
 						sData.m_length = sData.m_boneAxis.Size();
-						int myBoneIndex = RefSkeleton.FindBoneIndex(sData.boneName);
-
-#if	UE_VERSION_OLDER_THAN(5,0,0)
-						if (sData.boneIndex >= Output.Pose.GetPose().GetBoneContainer().GetSkeletonToPoseBoneIndexArray().Num()) {
-							continue;
-						}
-#else
-						if (Output.Pose.GetPose().GetBoneContainer().GetMeshPoseIndexFromSkeletonPoseIndex(FSkeletonPoseBoneIndex(sData.boneIndex)) == FMeshPoseBoneIndex(INDEX_NONE)) {
-							continue;
-						}
-#endif
+						if (!RefSkeletonTransform.IsValidIndex(sData.boneIndex)) continue;
 
 						{
 							FQuat ParentRotation = FQuat::Identity;
 							if (ChildCount == 0) {
-								FCompactPoseBoneIndex uu = Output.Pose.GetPose().GetBoneContainer().GetCompactPoseIndexFromSkeletonIndex(myBoneIndex);
+								FCompactPoseBoneIndex uu = Output.Pose.GetPose().GetBoneContainer().MakeCompactPoseIndex(FMeshPoseBoneIndex(sData.boneIndex));
 
 								if (Output.Pose.GetPose().IsValidIndex(uu) == false) {
 									continue;
@@ -453,8 +443,8 @@ namespace VRMSpringBone {
 	}
 	void VRMSpringManager::applyToComponent(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms) {
 
-		const auto RefSkeleton = Output.AnimInstanceProxy->GetSkeleton()->GetReferenceSkeleton();
 		const auto& RefSkeletonTransform = Output.Pose.GetPose().GetBoneContainer().GetRefPoseArray();
+		const auto& BoneContainer = Output.Pose.GetPose().GetBoneContainer();
 
 
 		VRMSpringManager* SpringManager = this;
@@ -467,8 +457,8 @@ namespace VRMSpringBone {
 				for (auto& sData : sChain) {
 
 
-					//FCompactPoseBoneIndex uu = Output.Pose.GetPose().GetBoneContainer().GetCompactPoseIndexFromSkeletonIndex(sData.boneIndex);
-					FCompactPoseBoneIndex uu(sData.boneIndex);
+					if (!RefSkeletonTransform.IsValidIndex(sData.boneIndex)) continue;
+					FCompactPoseBoneIndex uu = BoneContainer.MakeCompactPoseIndex(FMeshPoseBoneIndex(sData.boneIndex));
 
 					if (Output.Pose.GetPose().IsValidIndex(uu) == false) {
 						continue;

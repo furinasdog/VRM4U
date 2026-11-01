@@ -19,6 +19,17 @@ public class VRM4U : ModuleRules
 	{
 	    PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
+        string UmtRoot = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../../../Tools/UMTNativePlugin"));
+        string UmtLibrary = Path.Combine(UmtRoot, "build-static-ue144/bundled/UMTNativePlugin.lib");
+        bool WithPmxBullet = Target.Platform == UnrealTargetPlatform.Win64 && File.Exists(UmtLibrary);
+        PublicDefinitions.Add("WITH_VRM4U_PMX_BULLET=" + (WithPmxBullet ? "1" : "0"));
+        if (WithPmxBullet)
+        {
+            PrivateDefinitions.Add("UMT_NATIVE_STATIC=1");
+            PrivateIncludePaths.Add(Path.Combine(UmtRoot, "Source"));
+            PublicAdditionalLibraries.Add(UmtLibrary);
+        }
+
         PublicIncludePaths.AddRange(
 			new string[] {
                 //"VRM4U/Public",

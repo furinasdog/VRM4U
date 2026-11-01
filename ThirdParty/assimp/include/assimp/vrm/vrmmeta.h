@@ -134,6 +134,41 @@ extern "C" {
                 }
             }
         };
+
+        // PMX rigid bodies and joints are kept as importer metadata so a runtime
+        // consumer can build a PhysicsAsset without depending on the PMX parser.
+        struct ASSIMP_API VRMPmxRigidBody {
+            aiString name;
+            aiString boneName;
+            int boneIndex = -1;
+            unsigned char group = 0;
+            unsigned short mask = 0;
+            unsigned char shape = 0;
+            vec3 size = { 0, 0, 0 };
+            vec3 position = { 0, 0, 0 };
+            vec3 orientation = { 0, 0, 0 };
+            float mass = 0;
+            float moveAttenuation = 0;
+            float rotationAttenuation = 0;
+            float repulsion = 0;
+            float friction = 0;
+            unsigned char physicsCalcType = 0;
+        };
+
+        struct ASSIMP_API VRMPmxJoint {
+            aiString name;
+            unsigned char type = 0;
+            int rigidBody1 = -1;
+            int rigidBody2 = -1;
+            vec3 position = { 0, 0, 0 };
+            vec3 orientation = { 0, 0, 0 };
+            vec3 moveMin = { 0, 0, 0 };
+            vec3 moveMax = { 0, 0, 0 };
+            vec3 rotationMin = { 0, 0, 0 };
+            vec3 rotationMax = { 0, 0, 0 };
+            vec3 springMove = { 0, 0, 0 };
+            vec3 springRotation = { 0, 0, 0 };
+        };
         // physics
 
         // material
@@ -268,6 +303,11 @@ extern "C" {
             int colliderGroupNum = 0;
             VRMColliderGroup *colliderGroups = nullptr;
 
+            int pmxRigidBodyNum = 0;
+            VRMPmxRigidBody *pmxRigidBodies = nullptr;
+            int pmxJointNum = 0;
+            VRMPmxJoint *pmxJoints = nullptr;
+
             enum HumanoidBone{
                 MAX_BONE_NUM = 55,
             };
@@ -291,6 +331,10 @@ extern "C" {
                     delete[] colliderGroups;
                     colliderGroups = nullptr;
                 }
+                delete[] pmxRigidBodies;
+                pmxRigidBodies = nullptr;
+                delete[] pmxJoints;
+                pmxJoints = nullptr;
                 if (blendShapeGroup) {
                     delete[] blendShapeGroup;
                     blendShapeGroup = nullptr;
@@ -317,6 +361,13 @@ extern "C" {
                 for (int i=0; i<colliderGroupNum; ++i){
 					p->colliderGroups[i].CopyFrom(colliderGroups[i]);
 				}
+
+                p->pmxRigidBodyNum = pmxRigidBodyNum;
+                p->pmxRigidBodies = new VRMPmxRigidBody[pmxRigidBodyNum];
+                for (int i = 0; i < pmxRigidBodyNum; ++i) p->pmxRigidBodies[i] = pmxRigidBodies[i];
+                p->pmxJointNum = pmxJointNum;
+                p->pmxJoints = new VRMPmxJoint[pmxJointNum];
+                for (int i = 0; i < pmxJointNum; ++i) p->pmxJoints[i] = pmxJoints[i];
 
                 for (int i=0; i<sizeof(humanoidBone)/sizeof(humanoidBone[0]); ++i){
 					p->humanoidBone[i] = humanoidBone[i];

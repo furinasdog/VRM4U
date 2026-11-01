@@ -39,6 +39,23 @@
 #include <assimp/vrm/vrmmeta.h>
 
 namespace {
+	bool EnsureMorphCurveMetaData(USkeleton* Skeleton, FName Name)
+	{
+		if (!Skeleton) return false;
+#if UE_VERSION_OLDER_THAN(5,8,0)
+		Skeleton->AccumulateCurveMetaData(Name, false, true);
+#else
+		// Editor binaries also run with -game: GEditor is null, so never open an undo transaction here.
+		Skeleton->AddCurveMetaData(Name, false);
+		if (FCurveMetaData* MetaData = Skeleton->GetCurveMetaData(Name)) {
+			MetaData->Type.bMorphtarget = true;
+		} else {
+			return false;
+		}
+#endif
+		return true;
+	}
+
 #if WITH_EDITOR
 	void LocalPopulateDeltas(UMorphTarget* Morph, const TArray<FMorphTargetDelta>& Deltas, const int32 LODIndex, const TArray<struct FSkelMeshSection>& Sections)
 	{
@@ -623,13 +640,7 @@ bool VRMConverter::ConvertMorphTarget(UVrmAssetListObject *vrmAssetList) {
 #endif
 
 	for (auto name : MorphNameList) {
-		FCurveMetaData* FoundCurveMetaData = VRMGetSkeleton(sk)->GetCurveMetaData(*name);
-		if (FoundCurveMetaData) {
-			FoundCurveMetaData->Type.bMorphtarget = true;
-			continue;
-		}
-
-		VRMGetSkeleton(sk)->AccumulateCurveMetaData(*name, false, true);
+		if (!EnsureMorphCurveMetaData(VRMGetSkeleton(sk), *name)) return false;
 	}
 
 #if WITH_EDITOR
@@ -686,3 +697,31 @@ VrmConvertMorphTarget::VrmConvertMorphTarget()
 VrmConvertMorphTarget::~VrmConvertMorphTarget()
 {
 }
+
+#if WITH_DEV_AUTOMATION_TESTS && !UE_VERSION_OLDER_THAN(5,8,0)
+#include "Misc/AutomationTest.h"
+#if WITH_EDITOR
+#include "Editor.h"
+#endif
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVrmRuntimeMorphMetadataTest, "VRM4U.PMX.RuntimeMorphMetadata",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)
+bool FVrmRuntimeMorphMetadataTest::RunTest(const FString& Parameters)
+{
+	if (!TestFalse(TEXT("Run this regression with -game, not an editor world"), GIsEditor)) return false;
+#if WITH_EDITOR
+	if (!TestNull(TEXT("Editor binary running without GEditor"), GEditor)) return false;
+#endif
+	USkeleton* Skeleton = NewObject<USkeleton>();
+	const FName Name(TEXT("RuntimeBlink"));
+	if (!TestTrue(TEXT("Create runtime curve without an editor transaction"), EnsureMorphCurveMetaData(Skeleton, Name))) return false;
+	FCurveMetaData* MetaData = Skeleton->GetCurveMetaData(Name);
+	if (!TestNotNull(TEXT("Curve metadata is retained"), MetaData)) return false;
+	TestTrue(TEXT("Curve is marked as a morph"), MetaData->Type.bMorphtarget);
+	MetaData->Type.bMaterial = true;
+	TestTrue(TEXT("Repeated registration is safe"), EnsureMorphCurveMetaData(Skeleton, Name));
+	TestTrue(TEXT("Existing material flag is retained"), Skeleton->GetCurveMetaData(Name)->Type.bMaterial);
+	TestEqual(TEXT("No duplicate curve"), Skeleton->GetNumCurveMetaData(), 1);
+	return true;
+}
+#endif

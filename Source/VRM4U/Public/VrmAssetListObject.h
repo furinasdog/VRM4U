@@ -15,6 +15,7 @@ class UTexture2D;
 class USkeletalMesh;
 class USkeleton;
 class UVrmMetaObject;
+class UVrmPmxPhysicsData;
 class UVrmLicenseObject;
 class UVrm1LicenseObject;
 struct FReturnedData;
@@ -129,6 +130,9 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Out")
 	UVrmMetaObject* VrmMetaObject;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Out")
+    UVrmPmxPhysicsData* PmxPhysicsData = nullptr;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Out")
 	UVrmMetaObject* VrmHumanoidMetaObject;

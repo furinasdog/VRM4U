@@ -1,4 +1,4 @@
-﻿// Copyright 1998-2018 Epic Games, Inc. All Rights Reserved.
+// Copyright 1998-2018 Epic Games, Inc. All Rights Reserved.
 // The code associated with the initialization of the mesh is based on the Engine source.
 // VRM4U Copyright (c) 2021-2026 Haruyoshi Yamamoto. This software is released under the MIT License.
 
@@ -8,6 +8,7 @@
 
 #include "VrmAssetListObject.h"
 #include "VrmMetaObject.h"
+#include "VrmPmxPhysicsData.h"
 #include "VrmSkeleton.h"
 #include "LoaderBPFunctionLibrary.h"
 #include "VRM4ULoaderLog.h"
@@ -81,6 +82,220 @@ static constexpr float VRM4U_MaxBoneWeightFloat = UE::AnimationCore::MaxRawBoneW
 static constexpr float VRM4U_InvMaxRawBoneWeightFloat = 1.0f / VRM4U_MaxBoneWeightFloat;
 static constexpr float VRM4U_BoneWeightThreshold = VRM4U_InvMaxRawBoneWeightFloat;
 
+
+namespace {
+	static FVector PMXToUE(const VRM::vec3 Value, float ModelScale) {
+		return FVector(Value[0], -Value[2], Value[1]) * (100.f * ModelScale);
+	}
+
+	static FQuat PMXRotationToUE(const VRM::vec3 Value) {
+        // PMX YXZ, reflected from Y-up simulation space into the imported mesh basis.
+        return (FQuat(FVector::ZAxisVector, Value[1])
+            * FQuat(FVector::XAxisVector, Value[0])
+            * FQuat(FVector::YAxisVector, -Value[2])).GetNormalized();
+	}
+
+    static void PersistPmxPhysics(UVrmAssetListObject* Asset, const VRM::VRMMetadata* Meta) {
+        if (!Asset) return;
+        Asset->PmxPhysicsData = nullptr;
+        if (!Meta || Meta->pmxRigidBodyNum <= 0 || Meta->pmxRigidBodyNum > 16384 || !Meta->pmxRigidBodies
+            || Meta->pmxJointNum < 0 || Meta->pmxJointNum > 32768 || (Meta->pmxJointNum && !Meta->pmxJoints)) return;
+        auto* Data = NewObject<UVrmPmxPhysicsData>(Asset);
+        Data->ModelScale = VRMConverter::Options::Get().GetModelScale();
+        const auto Vector = [](const VRM::vec3 V) { return FVector(V[0], V[1], V[2]); };
+        for (int32 I = 0; I < Meta->pmxRigidBodyNum; ++I) {
+            const auto& S = Meta->pmxRigidBodies[I];
+            auto& D = Data->RigidBodies.AddDefaulted_GetRef();
+            D.Name = UTF8_TO_TCHAR(S.name.C_Str()); D.BoneName = FName(UTF8_TO_TCHAR(S.boneName.C_Str()));
+            D.SourceBoneIndex = S.boneIndex; D.Group = S.group; D.CollisionMask = S.mask; D.Shape = S.shape; D.Mode = S.physicsCalcType;
+            D.Size = Vector(S.size); D.Position = Vector(S.position); D.Rotation = Vector(S.orientation);
+            D.Mass = S.mass; D.LinearDamping = S.moveAttenuation; D.AngularDamping = S.rotationAttenuation;
+            D.Restitution = S.repulsion; D.Friction = S.friction;
+        }
+        for (int32 I = 0; I < Meta->pmxJointNum; ++I) {
+            const auto& S = Meta->pmxJoints[I];
+            auto& D = Data->Joints.AddDefaulted_GetRef();
+            D.Name = UTF8_TO_TCHAR(S.name.C_Str()); D.Type = S.type; D.BodyA = S.rigidBody1; D.BodyB = S.rigidBody2;
+            D.Position = Vector(S.position); D.Rotation = Vector(S.orientation);
+            D.TranslationMin = Vector(S.moveMin); D.TranslationMax = Vector(S.moveMax);
+            D.RotationMin = Vector(S.rotationMin); D.RotationMax = Vector(S.rotationMax);
+            D.SpringTranslation = Vector(S.springMove); D.SpringRotation = Vector(S.springRotation);
+        }
+        Asset->PmxPhysicsData = Data;
+    }
+
+	static TArray<FTransform> PmxRefComponentPose(const FReferenceSkeleton& Ref) {
+		TArray<FTransform> Pose;
+		Pose.Reserve(Ref.GetNum());
+		for (int32 BoneIndex = 0; BoneIndex < Ref.GetNum(); ++BoneIndex) {
+			FTransform Transform = Ref.GetRefBonePose()[BoneIndex];
+			const int32 Parent = Ref.GetParentIndex(BoneIndex);
+			if (Pose.IsValidIndex(Parent)) Transform = Transform * Pose[Parent];
+			Pose.Add(Transform);
+		}
+		return Pose;
+	}
+
+	static int32 PmxBoneIndex(const FReferenceSkeleton& Ref, const VRM::VRMPmxRigidBody& Body) {
+		if (Body.boneName.length <= 0) return INDEX_NONE;
+		return Ref.FindBoneIndex(FName(UTF8_TO_TCHAR(Body.boneName.C_Str())));
+	}
+
+	static FVector UEToVRM0Vector(const FVector& Value) {
+		return FVector(-Value.X, Value.Z, Value.Y);
+	}
+
+	static FVector PmxColliderOffset(const FVector& BoneLocalUE) {
+		// VRM0 spring collision converts this basis back to UE and multiplies by 100.
+		return UEToVRM0Vector(BoneLocalUE) / 100.f;
+	}
+
+	static float PmxCollisionRadius(const VRM::VRMPmxRigidBody& Body, float ModelScale) {
+		// shortcut: VRM0 spring collision has spheres only; use an enclosing radius for PMX boxes/capsules until shape collision is implemented.
+		const float Radius = Body.shape == 0 ? FMath::Abs(Body.size[0])
+			: FMath::Max3(FMath::Abs(Body.size[0]), FMath::Abs(Body.size[1]), FMath::Abs(Body.size[2]));
+		return FMath::Max(Radius * ModelScale, .005f);
+	}
+	static float PmxCapsuleLength(const VRM::VRMPmxRigidBody& Body, float ModelScale) {
+		// PMX size.y and UE FKSphylElem::Length both mean the cylindrical segment's full length.
+		return FMath::Max(FMath::Abs(Body.size[1]) * 100.f * ModelScale, 0.f);
+	}
+
+	static bool CreatePmxPhysicsAsset(USkeletalMesh* Sk, const VRM::VRMMetadata* Meta, UPhysicsAsset*& OutAsset) {
+		if (!Sk || !Meta || Meta->pmxRigidBodyNum <= 0 || Meta->pmxRigidBodyNum > 16384 || !Meta->pmxRigidBodies
+			|| Meta->pmxJointNum < 0 || Meta->pmxJointNum > 32768 || (Meta->pmxJointNum > 0 && !Meta->pmxJoints)) return false;
+		const float ModelScale = VRMConverter::Options::Get().GetModelScale();
+		if (!FMath::IsFinite(ModelScale) || ModelScale <= 0.f) return false;
+		OutAsset = VRM4U_NewObject<UPhysicsAsset>(GetTransientPackage(), NAME_None, EObjectFlags::RF_Public | RF_Transient, nullptr);
+		if (!OutAsset) return false;
+		const FReferenceSkeleton& Ref = VRMGetRefSkeleton(Sk);
+		const TArray<FTransform> RefPose = PmxRefComponentPose(Ref);
+		TArray<int32> BodyIndices;
+		BodyIndices.Init(INDEX_NONE, Meta->pmxRigidBodyNum);
+		TMap<FName, int32> SetupByBone;
+		for (int32 Index = 0; Index < Meta->pmxRigidBodyNum; ++Index) {
+			const VRM::VRMPmxRigidBody& Source = Meta->pmxRigidBodies[Index];
+			if (Source.shape > 2 || !FMath::IsFinite(Source.mass) || !FMath::IsFinite(Source.moveAttenuation)
+				|| !FMath::IsFinite(Source.rotationAttenuation)) continue;
+			const int32 BoneIndex = PmxBoneIndex(Ref, Source);
+			if (BoneIndex == INDEX_NONE) continue;
+			const FName BoneName = Ref.GetBoneName(BoneIndex);
+			const FVector LocalCenter = RefPose[BoneIndex].InverseTransformPosition(PMXToUE(Source.position, ModelScale));
+			const FRotator LocalRotation = RefPose[BoneIndex].InverseTransformRotation(PMXRotationToUE(Source.orientation)).Rotator();
+			const FVector Size = FVector(FMath::Abs(Source.size[0]), FMath::Abs(Source.size[2]), FMath::Abs(Source.size[1])) * (100.f * ModelScale);
+			if (LocalCenter.ContainsNaN() || LocalRotation.ContainsNaN() || Size.ContainsNaN()) continue;
+			int32* ExistingIndex = SetupByBone.Find(BoneName);
+			USkeletalBodySetup* Body = ExistingIndex ? static_cast<USkeletalBodySetup*>(OutAsset->SkeletalBodySetups[*ExistingIndex])
+				: NewObject<USkeletalBodySetup>(OutAsset, NAME_None, RF_Transient);
+			if (!ExistingIndex) {
+				Body->BoneName = BoneName;
+				Body->PhysicsType = Source.physicsCalcType == 0 ? PhysType_Kinematic : PhysType_Simulated;
+				Body->CollisionReponse = EBodyCollisionResponse::BodyCollision_Enabled;
+				Body->DefaultInstance.SetMassOverride(FMath::Max(Source.mass, 0.001f));
+				Body->DefaultInstance.LinearDamping = FMath::Max(Source.moveAttenuation, 0.f);
+				Body->DefaultInstance.AngularDamping = FMath::Max(Source.rotationAttenuation, 0.f);
+			}
+			FKAggregateGeom Geometry;
+			if (Source.shape == 0) {
+				FKSphereElem Sphere;
+				Sphere.Center = LocalCenter;
+				Sphere.Radius = FMath::Max(Size.X, 0.1f);
+				Geometry.SphereElems.Add(Sphere);
+			} else if (Source.shape == 1) {
+				FKBoxElem Box;
+				Box.Center = LocalCenter;
+				Box.Rotation = LocalRotation;
+				Box.X = FMath::Max(Size.X * 2.f, 0.1f); Box.Y = FMath::Max(Size.Y * 2.f, 0.1f); Box.Z = FMath::Max(Size.Z * 2.f, 0.1f);
+				Geometry.BoxElems.Add(Box);
+			} else {
+				FKSphylElem Capsule;
+				Capsule.Center = LocalCenter;
+				Capsule.Rotation = LocalRotation;
+				Capsule.Radius = FMath::Max(Size.X, 0.1f);
+				Capsule.Length = PmxCapsuleLength(Source, ModelScale);
+				Geometry.SphylElems.Add(Capsule);
+			}
+			Body->AddCollisionFrom(Geometry);
+			BodyIndices[Index] = ExistingIndex ? *ExistingIndex : OutAsset->SkeletalBodySetups.Add(Body);
+			if (!ExistingIndex) SetupByBone.Add(BoneName, BodyIndices[Index]);
+		}
+		for (USkeletalBodySetup* Body : OutAsset->SkeletalBodySetups) {
+			Body->InvalidatePhysicsData();
+			Body->CreatePhysicsMeshes();
+		}
+		for (int32 Index = 0; Index < Meta->pmxJointNum; ++Index) {
+			const VRM::VRMPmxJoint& Source = Meta->pmxJoints[Index];
+			if (!BodyIndices.IsValidIndex(Source.rigidBody1) || !BodyIndices.IsValidIndex(Source.rigidBody2)) continue;
+			const int32 Body1 = BodyIndices[Source.rigidBody1], Body2 = BodyIndices[Source.rigidBody2];
+			if (Body1 == INDEX_NONE || Body2 == INDEX_NONE || Body1 == Body2) continue;
+			const FName Bone1 = OutAsset->SkeletalBodySetups[Body1]->BoneName;
+			const FName Bone2 = OutAsset->SkeletalBodySetups[Body2]->BoneName;
+			UPhysicsConstraintTemplate* Constraint = NewObject<UPhysicsConstraintTemplate>(OutAsset, NAME_None, RF_Transient);
+			Constraint->DefaultInstance.ConstraintBone1 = Bone1;
+			Constraint->DefaultInstance.ConstraintBone2 = Bone2;
+			Constraint->DefaultInstance.JointName = Source.name.length > 0 ? FName(UTF8_TO_TCHAR(Source.name.C_Str())) : FName(*FString::Printf(TEXT("PMXJoint_%d"), Index));
+			const FVector JointWorld = PMXToUE(Source.position, ModelScale);
+			if (JointWorld.ContainsNaN()) continue;
+			Constraint->DefaultInstance.Pos1 = RefPose[Ref.FindBoneIndex(Bone1)].InverseTransformPosition(JointWorld);
+			Constraint->DefaultInstance.Pos2 = RefPose[Ref.FindBoneIndex(Bone2)].InverseTransformPosition(JointWorld);
+			Constraint->DefaultInstance.SetAngularSwing1Limit(EAngularConstraintMotion::ACM_Limited, FMath::RadiansToDegrees(FMath::Max(FMath::Abs(Source.rotationMax[0]), FMath::Abs(Source.rotationMin[0]))));
+			Constraint->DefaultInstance.SetAngularSwing2Limit(EAngularConstraintMotion::ACM_Limited, FMath::RadiansToDegrees(FMath::Max(FMath::Abs(Source.rotationMax[1]), FMath::Abs(Source.rotationMin[1]))));
+			Constraint->DefaultInstance.SetAngularTwistLimit(EAngularConstraintMotion::ACM_Limited, FMath::RadiansToDegrees(FMath::Max(FMath::Abs(Source.rotationMax[2]), FMath::Abs(Source.rotationMin[2]))));
+			Constraint->DefaultInstance.ProfileInstance.ConeLimit.Stiffness = FMath::Max(Source.springRotation[0], 0.f);
+			Constraint->DefaultInstance.ProfileInstance.TwistLimit.Stiffness = FMath::Max(Source.springRotation[1], 0.f);
+			OutAsset->ConstraintSetup.Add(Constraint);
+		}
+		if (OutAsset->SkeletalBodySetups.IsEmpty()) { OutAsset = nullptr; return false; }
+		OutAsset->UpdateBodySetupIndexMap();
+		OutAsset->RefreshPhysicsAssetChange();
+		VRMSetPhysicsAsset(Sk, OutAsset);
+		return true;
+	}
+
+	static void PopulatePmxSpringMeta(UVrmAssetListObject* Asset, USkeletalMesh* Sk, const VRM::VRMMetadata* Meta) {
+		if (!Asset || !Asset->VrmMetaObject || !Sk || !Meta || !Meta->pmxRigidBodies) return;
+		const float ModelScale = VRMConverter::Options::Get().GetModelScale();
+		const FReferenceSkeleton& Ref = VRMGetRefSkeleton(Sk);
+		const TArray<FTransform> RefPose = PmxRefComponentPose(Ref);
+		Asset->VrmMetaObject->VRMSpringMeta.Reset();
+		Asset->VrmMetaObject->VRMColliderMeta.Reset();
+		for (int Pass = 0; Pass < 2; ++Pass) {
+			for (int32 Index = 0; Index < Meta->pmxRigidBodyNum; ++Index) {
+				const VRM::VRMPmxRigidBody& Body = Meta->pmxRigidBodies[Index];
+				if ((Body.physicsCalcType == 0) != (Pass == 0)) continue;
+				if (Body.shape > 2 || !FMath::IsFinite(Body.rotationAttenuation) || !FMath::IsFinite(Body.moveAttenuation)) continue;
+				const int32 BoneIndex = PmxBoneIndex(Ref, Body);
+				if (BoneIndex == INDEX_NONE) continue;
+				const float Radius = PmxCollisionRadius(Body, ModelScale);
+				if (!FMath::IsFinite(Radius)) continue;
+				if (Pass == 0) {
+					FVRMColliderMeta Collider;
+					Collider.bone = BoneIndex;
+					Collider.boneName = Ref.GetBoneName(BoneIndex).ToString();
+					FVRMSpringColliderData Shape;
+					Shape.offset = PmxColliderOffset(RefPose[BoneIndex].InverseTransformPosition(PMXToUE(Body.position, ModelScale)));
+					if (Shape.offset.ContainsNaN()) continue;
+					Shape.radius = Radius;
+					Collider.collider.Add(Shape);
+					Asset->VrmMetaObject->VRMColliderMeta.Add(MoveTemp(Collider));
+				} else {
+					FVRMSpringMeta Spring;
+					// shortcut: PMX damping approximates VRM0 spring behavior; use the PMX joint solver for exact dynamics.
+					Spring.stiffness = FMath::Clamp(Body.rotationAttenuation, .05f, 1.f);
+					Spring.gravityPower = 1.f;
+					Spring.gravityDir = Asset->model_root_transform.InverseTransformVector(UEToVRM0Vector(FVector(0, 0, -1)));
+					Spring.dragForce = FMath::Clamp(Body.moveAttenuation, 0.f, 1.f);
+					Spring.hitRadius = Radius;
+					Spring.bones.Add(BoneIndex);
+					Spring.boneNames.Add(Ref.GetBoneName(BoneIndex).ToString());
+					for (int32 ColliderIndex = 0; ColliderIndex < Asset->VrmMetaObject->VRMColliderMeta.Num(); ++ColliderIndex)
+						Spring.ColliderIndexArray.Add(ColliderIndex);
+					Asset->VrmMetaObject->VRMSpringMeta.Add(MoveTemp(Spring));
+				}
+			}
+		}
+	}
+}
 
 #if WITH_EDITOR
 typedef FSoftSkinVertex FSoftSkinVertexLocal;
@@ -2159,7 +2374,15 @@ bool VRMConverter::ConvertModel(UVrmAssetListObject *vrmAssetList) {
 			}
 		}
 	}
-	if (aiData->mVRMMeta && Options::Get().IsSkipPhysics()==false) {
+    PersistPmxPhysics(vrmAssetList, reinterpret_cast<VRM::VRMMetadata*>(aiData->mVRMMeta));
+	if (aiData->mVRMMeta && Options::Get().IsSkipPhysics() == false) {
+		VRM::VRMMetadata* pmxMeta = reinterpret_cast<VRM::VRMMetadata*>(aiData->mVRMMeta);
+		if (pmxMeta->pmxRigidBodyNum > 0) {
+			if (CreatePmxPhysicsAsset(sk, pmxMeta, pa)) {
+                // PMX joint constraints and collision masks cannot be represented by VRM0 spring chains.
+				UE_LOG(LogVRM4ULoader, Log, TEXT("PMX physics metadata: rigid_bodies=%d joints=%d"), pmxMeta->pmxRigidBodyNum, pmxMeta->pmxJointNum);
+			}
+		}
 
 		bool spring0 = false;
 		bool spring1 = false;
@@ -2842,3 +3065,80 @@ VrmConvertModel::VrmConvertModel()
 VrmConvertModel::~VrmConvertModel()
 {
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Misc/AutomationTest.h"
+#include "Serialization/ObjectWriter.h"
+#include "Serialization/ObjectReader.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPmxPhysicsPersistenceTest, "VRM4U.PMX.PhysicsPersistence",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FPmxPhysicsPersistenceTest::RunTest(const FString& Parameters)
+{
+    VRM::VRMMetadata Meta;
+    Meta.pmxRigidBodyNum = 1; Meta.pmxRigidBodies = new VRM::VRMPmxRigidBody[1];
+    Meta.pmxJointNum = 1; Meta.pmxJoints = new VRM::VRMPmxJoint[1];
+    auto& B = Meta.pmxRigidBodies[0];
+    B.name = aiString("hair"); B.boneName = aiString("head"); B.boneIndex = 7;
+    B.group = 13; B.mask = 0xff0f; B.physicsCalcType = 2; B.shape = 2;
+    B.moveAttenuation = 1; B.rotationAttenuation = 2;
+    B.position[0] = 1; B.position[1] = 2; B.position[2] = 3;
+    auto& J = Meta.pmxJoints[0];
+    J.name = aiString("joint"); J.type = 5; J.rigidBody1 = 0; J.rigidBody2 = -1;
+    J.rotationMin[2] = -.4f; J.springRotation[1] = 17;
+    auto* Asset = NewObject<UVrmAssetListObject>();
+    PersistPmxPhysics(Asset, &Meta);
+    if (!TestNotNull(TEXT("PMX data is retained by its asset"), Asset->PmxPhysicsData)) return false;
+    B.position[2] = 99;
+    TestTrue(TEXT("Importer memory is copied without changing the raw PMX basis"), Asset->PmxPhysicsData->RigidBodies[0].Position.Equals(FVector(1, 2, 3)));
+    TArray<uint8> Bytes;
+    FObjectWriter Save(Asset->PmxPhysicsData, Bytes);
+    auto* Restored = NewObject<UVrmPmxPhysicsData>();
+    FObjectReader Load(Restored, Bytes);
+    TestEqual(TEXT("Rigid data survives UObject serialization"), Restored->RigidBodies.Num(), 1);
+    TestEqual(TEXT("Joint data survives UObject serialization"), Restored->Joints.Num(), 1);
+    if (Restored->RigidBodies.IsEmpty() || Restored->Joints.IsEmpty()) return false;
+    TestEqual(TEXT("Raw PMX allowed collision bits are retained without inversion"), Restored->RigidBodies[0].CollisionMask, int32(0xff0f));
+    TestEqual(TEXT("Authored out-of-range damping is preserved by serialization"), Restored->RigidBodies[0].AngularDamping, 2.f);
+    TestEqual(TEXT("Bone-aligned mode is retained"), Restored->RigidBodies[0].Mode, 2);
+    TestEqual(TEXT("Unsupported joint types remain available for explicit runtime rejection"), Restored->Joints[0].Type, 5);
+    TestEqual(TEXT("Joint body indices are retained"), Restored->Joints[0].BodyB, -1);
+    TestTrue(TEXT("Rotation limits and spring values are retained"), FMath::IsNearlyEqual(Restored->Joints[0].RotationMin.Z, -.4, .00001) && Restored->Joints[0].SpringRotation.Y == 17);
+    TestEqual(TEXT("Importer model scale is retained"), Restored->ModelScale, VRMConverter::Options::Get().GetModelScale());
+    auto* Copy = NewObject<UVrmAssetListObject>(); Asset->CopyMember(Copy);
+    TestEqual(TEXT("Asset copying retains physics data"), Copy->PmxPhysicsData, Asset->PmxPhysicsData);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPmxPhysicsBasisTest, "VRM4U.PMX.PhysicsBasis",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FPmxPhysicsBasisTest::RunTest(const FString& Parameters)
+{
+	const VRM::vec3 Position = { 1.f, 2.f, 3.f };
+	TestTrue(TEXT("PMX coordinates use the imported mesh basis and model scale"), PMXToUE(Position, .1f).Equals(FVector(10, -30, 20), .001f));
+	const FVector BoneLocal(10, 20, 30);
+	const FVector VRM0Offset = PmxColliderOffset(BoneLocal);
+	TestTrue(TEXT("Spring collider offset round-trips through the VRM0 basis"),
+		FVector(-VRM0Offset.X, VRM0Offset.Z, VRM0Offset.Y).Equals(BoneLocal / 100.f, .00001f));
+	const FTransform Root(FRotator(0, 37, 0));
+	const FVector EncodedGravity = Root.InverseTransformVector(UEToVRM0Vector(FVector(0, 0, -1)));
+	const FVector SpringGravity = Root.TransformVector(EncodedGravity);
+	TestTrue(TEXT("VRM0 spring gravity resolves to UE down after root transform"),
+		FVector(-SpringGravity.X, SpringGravity.Z, SpringGravity.Y).Equals(FVector(0, 0, -1), .00001f));
+	VRM::VRMPmxRigidBody Sphere;
+	Sphere.shape = 0;
+	Sphere.size[0] = .5f;
+	TestTrue(TEXT("Spring radius scales with the mesh"), FMath::IsNearlyEqual(PmxCollisionRadius(Sphere, .1f) * 100.f, 5.f));
+	VRM::VRMPmxRigidBody Capsule;
+	Capsule.shape = 2;
+	Capsule.size[1] = .8f;
+	TestTrue(TEXT("PMX capsule cylinder length stays full length"), FMath::IsNearlyEqual(PmxCapsuleLength(Capsule, .1f), 8.f));
+	const VRM::vec3 XRotation = { PI / 2.f, 0.f, 0.f };
+	TestTrue(TEXT("PMX X rotation follows the reflected UE basis"),
+		PMXRotationToUE(XRotation).RotateVector(FVector(0, 1, 0)).Equals(FVector(0, 0, 1), .001f));
+	const VRM::vec3 MixedRotation = { PI / 2.f, PI / 2.f, 0.f };
+	TestTrue(TEXT("PMX mixed rotation follows YXZ order"),
+		PMXRotationToUE(MixedRotation).RotateVector(FVector(1, 0, 0)).Equals(FVector(0, 1, 0), .001f));
+	return true;
+}
+#endif

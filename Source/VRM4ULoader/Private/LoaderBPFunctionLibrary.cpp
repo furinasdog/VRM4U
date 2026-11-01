@@ -842,7 +842,7 @@ bool ULoaderBPFunctionLibrary::LoadVRMFileFromMemory(const UVrmAssetListObject *
 	}
 	out->VrmMetaObject->SkeletalMesh = out->SkeletalMesh;
 
-	VRMSetPhysicsAsset(out->VrmMetaObject->SkeletalMesh, nullptr);
+	// Keep the imported PMX/VRM PhysicsAsset for runtime spring and collision evaluation.
 
 
 	{
