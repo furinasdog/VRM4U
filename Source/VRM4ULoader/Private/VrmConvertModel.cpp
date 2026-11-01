@@ -247,7 +247,10 @@ namespace {
 		}
 		if (OutAsset->SkeletalBodySetups.IsEmpty()) { OutAsset = nullptr; return false; }
 		OutAsset->UpdateBodySetupIndexMap();
+
+#if WITH_EDITOR
 		OutAsset->RefreshPhysicsAssetChange();
+#endif
 		VRMSetPhysicsAsset(Sk, OutAsset);
 		return true;
 	}
