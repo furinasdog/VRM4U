@@ -2,6 +2,8 @@
 
 Based on upstream `ruyo/VRM4U` tag `v1.2026.10.17` (`7395b50e9aa50245c8677132d805e8a8eff10093`). This fork retains the upstream license and commit ancestry.
 
+The current integration tree excludes the upstream VRoid example characters, their textures/animations and dependent demonstration assets. Generic ImportDataSet and MaterialUtil resources remain available for runtime importing. Character packages and user-derived textures are supplied by the user and are not bundled. Upstream commit ancestry is retained; historical example assets are not rewritten out of Git history.
+
 The PMX MToon conversion preserves Assimp's diffuse color and opacity after generic MToon defaults are applied. Models can use zero opacity for hidden expression or clothing layers; turning these layers opaque obscures the face and clothing. Fractional opacity also selects a translucent blend mode. Other formats follow the upstream path.
 
 PMX LOD0 explicitly keeps 100% of source vertices and triangles. UE 5.8's default reduction settings otherwise halve newly constructed PMX meshes before the runtime buffers are uploaded.
