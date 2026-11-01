@@ -19,7 +19,7 @@ static_assert(sizeof(MMDBulletPhysics::NativeConfig) == 36, "UMT configuration A
 
 namespace
 {
-    // Bullet 2.75's additional low-speed damping is tuned for MMD's 60 Hz step.
+    // Keep the MMD fixed step; long frames are bounded/reset rather than fed into Bullet.
     constexpr float FixedStep = 1.f / 60.f;
     constexpr int32 MaximumSteps = 8;
 
@@ -214,7 +214,7 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
         if (N.size[0] <= 0 || (B.Shape == 1 && (N.size[1] <= 0 || N.size[2] <= 0)))
         { Error = TEXT("PMX collider dimensions underflow native precision."); return false; }
         N.mass = B.Mass;
-        // Bullet 2.75 setDamping clamps finite inputs; preserve the authored raw values in Data.
+        // Bullet setDamping clamps finite inputs; preserve the authored raw values in Data.
         N.linearDamping = FMath::Clamp(B.LinearDamping, 0.f, 1.f);
         N.angularDamping = FMath::Clamp(B.AngularDamping, 0.f, 1.f);
         N.restitution = B.Restitution; N.friction = B.Friction;
@@ -240,7 +240,8 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
             N.rotationLimitMin[Axis] = float(Axis == 2 ? J.RotationMin[Axis] : -J.RotationMax[Axis]);
             N.rotationLimitMax[Axis] = float(Axis == 2 ? J.RotationMax[Axis] : -J.RotationMin[Axis]);
             N.springTranslation[Axis] = float(J.SpringTranslation[Axis]);
-            N.springRotation[Axis] = float(J.SpringRotation[Axis]) * LengthScale * LengthScale;
+            // Spring2 matches MMD Tools' authored stiffness; the old motor's scale^2 conversion does not apply.
+            N.springRotation[Axis] = float(J.SpringRotation[Axis]);
             if (!FMath::IsFinite(N.translationLimitMin[Axis]) || !FMath::IsFinite(N.translationLimitMax[Axis])
                 || !FMath::IsFinite(N.springRotation[Axis]))
             { Error = TEXT("PMX joint parameters overflow native precision."); return false; }
@@ -252,9 +253,9 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
     MMDBulletPhysics::NativeConfig Config{};
     Config.groundNormal[1] = 1;
     Config.mmdUnitToUnityUnit = LengthScale;
-    Config.convexMargin = .04f * LengthScale;
-    Config.springTranslationDamping = 2.f;
-    Config.springRotationDamping = 2.f / (LengthScale * LengthScale);
+    Config.convexMargin = 1.e-6f;
+    Config.springTranslationDamping = .5f;
+    Config.springRotationDamping = .5f;
     Config.lockedTranslationReinforce = 1;
     MMDBulletPhysicsSetConfig(State->Context, &Config);
     MMDBulletPhysicsBuildRigidBodies(State->Context, NativeBodies.GetData(), NativeBodies.Num());
