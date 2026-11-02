@@ -9,6 +9,7 @@
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
 #include "Serialization/Archive.h"
+#include "Serialization/MemoryWriter.h"
 #endif
 
 #ifndef WITH_VRM4U_PMX_BULLET
@@ -179,6 +180,7 @@ struct FVrmPmxPhysics::FImpl
     // Explicit development-only capture of calls crossing the native ABI, not a new simulation path.
     FString QaEventsPath;
     TUniquePtr<FArchive> QaEventsWriter;
+    TArray<uint8> QaEventsBuffer;
     uint64 QaEventsBytes = 0;
     uint32 QaEventsCount = 0, QaEventsFrames = 0, QaEventsEnded = 0;
     double QaEventsSeconds = 0;
@@ -199,8 +201,10 @@ struct FVrmPmxPhysics::FImpl
         QaEventsWriter->Serialize(const_cast<uint32*>(Counts), sizeof(Counts));
         QaEventsWriter->Serialize(const_cast<float*>(&Seconds), sizeof(Seconds));
         QaEventsBytes += sizeof(Header) + sizeof(Counts) + sizeof(Seconds);
-        const bool bSaved = QaEventsWriter->Close() && !QaEventsWriter->IsError();
+        const bool bMemoryValid = QaEventsWriter->Close() && !QaEventsWriter->IsError();
         QaEventsWriter.Reset();
+        const bool bSaved = bMemoryValid && FFileHelper::SaveArrayToFile(QaEventsBuffer, *QaEventsPath);
+        QaEventsBuffer.Empty();
         if (bSaved && Status == 0)
         {
             UE_LOG(LogTemp, Display, TEXT("PMX_QA_EVENTS saved=1 status=%u frames=%u ended=%u events=%u bytes=%llu elapsed=%.6f path=\"%s\""),
@@ -257,9 +261,10 @@ struct FVrmPmxPhysics::FImpl
         if (uint64(Bytes.Num()) + 44ull > QaEventsMaxBytes
             || !IFileManager::Get().MakeDirectory(*FPaths::GetPath(QaEventsPath), true))
         { UE_LOG(LogTemp, Warning, TEXT("PMX_QA_EVENTS saved=0 metadata_or_directory path=\"%s\""), *QaEventsPath); return; }
-        QaEventsWriter.Reset(IFileManager::Get().CreateFileWriter(*QaEventsPath));
-        if (!QaEventsWriter)
-        { UE_LOG(LogTemp, Warning, TEXT("PMX_QA_EVENTS saved=0 open_failed path=\"%s\""), *QaEventsPath); return; }
+        // Reserve once before the first step; motion capture performs no per-frame disk writes.
+        QaEventsBuffer.Reset();
+        QaEventsBuffer.Reserve(int32(QaEventsMaxBytes));
+        QaEventsWriter = MakeUnique<FMemoryWriter>(QaEventsBuffer, true);
         ANSICHAR Magic[8] = {'P','M','X','U','E','E','0','1'};
         QaEventsWriter->Serialize(Magic, sizeof(Magic)); QaEventsBytes = sizeof(Magic);
         if (QaEventsRecord(0, Bytes.GetData(), Bytes.Num()))
@@ -471,6 +476,7 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
         State->AllIndices.Add(I);
         (B.Mode == 0 ? State->KinematicIndices : State->DynamicIndices).Add(I);
         auto& N = NativeBodies.AddDefaulted_GetRef();
+        FMemory::Memzero(&N, sizeof(N));
         N.rigidBodyIndex = I; N.relatedBoneIndex = Bone; N.noRelatedBone = Bone == INDEX_NONE;
         N.groupIndex = uint8(B.Group);
         // PMX and Bullet both use set bits for allowed collision groups.
@@ -495,6 +501,7 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
     for (const auto& J : Data.Joints)
     {
         auto& N = NativeJoints.AddDefaulted_GetRef();
+        FMemory::Memzero(&N, sizeof(N));
         N.type = MMDBulletPhysics::JointType(J.Type); N.rigidBodyAIndex = J.BodyA; N.rigidBodyBIndex = J.BodyB;
         FTransform Joint = PmxComponentTransform(J.Position, J.Rotation, Data.ModelScale) * ComponentToWorld;
         FTransform A = State->BodyRest[J.BodyA] * ComponentToWorld;
