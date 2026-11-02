@@ -46,6 +46,19 @@ struct VRM4U_API FVrmPmxJointData
     UPROPERTY() FVector SpringRotation = FVector::ZeroVector;
 };
 
+// Array order is the original PMX bone index, independent of UE's reordered skeleton.
+USTRUCT()
+struct VRM4U_API FVrmPmxBoneTransformData
+{
+    GENERATED_BODY()
+    UPROPERTY() FName BoneName;
+    UPROPERTY() int32 SourceParentIndex = INDEX_NONE;
+    UPROPERTY() int32 DeformLayer = 0;
+    UPROPERTY() int32 Flags = 0;
+    UPROPERTY() int32 AppendSourceIndex = INDEX_NONE;
+    UPROPERTY() float AppendWeight = 0;
+};
+
 UCLASS(BlueprintType)
 class VRM4U_API UVrmPmxPhysicsData : public UObject
 {
@@ -54,4 +67,5 @@ public:
     UPROPERTY() float ModelScale = 1;
     UPROPERTY() TArray<FVrmPmxRigidBodyData> RigidBodies;
     UPROPERTY() TArray<FVrmPmxJointData> Joints;
+    UPROPERTY() TArray<FVrmPmxBoneTransformData> BoneTransforms;
 };

@@ -248,7 +248,7 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
         }
     }
     const float Gravity[3] = {0, -9.8f, 0};
-    State->Context = MMDBulletPhysicsCreate(Gravity, 20, 1, FixedStep);
+    State->Context = MMDBulletPhysicsCreate(Gravity, 80, 1, FixedStep);
     if (!State->Context) { Error = TEXT("Cannot create PMX physics context."); return false; }
     MMDBulletPhysics::NativeConfig Config{};
     Config.groundNormal[1] = 1;
@@ -347,7 +347,7 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
                 // Preserve the animated local position in the resolved physical parent frame.
                 Resolved[Bone].SetRotation(Target->GetRotation());
                 const FTransform DesiredBody = Impl->BodyOffsets[I] * Resolved[Bone] * ComponentToWorld;
-                // UMT subtracts this world-space delta without clearing dynamic velocities.
+                // Match permanent MMD Mode2 semantics: align position while retaining the solver velocity.
                 const FVector Delta = SwapYZ(Dynamic[K].GetLocation() - DesiredBody.GetLocation()) / 100.;
                 const float Shift[3] = {float(Delta.X), float(Delta.Y), float(Delta.Z)};
                 if (!FMath::IsFinite(Shift[0]) || !FMath::IsFinite(Shift[1]) || !FMath::IsFinite(Shift[2]))

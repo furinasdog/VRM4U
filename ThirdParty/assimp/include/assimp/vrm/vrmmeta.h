@@ -169,6 +169,16 @@ extern "C" {
             vec3 springMove = { 0, 0, 0 };
             vec3 springRotation = { 0, 0, 0 };
         };
+
+        // Source PMX order and flags are needed by the runtime append-transform pass.
+        struct ASSIMP_API VRMPmxBoneTransform {
+            aiString boneName;
+            int parentIndex = -1;
+            int deformLayer = 0;
+            unsigned short flags = 0;
+            int grantIndex = -1;
+            float grantWeight = 0;
+        };
         // physics
 
         // material
@@ -319,6 +329,9 @@ extern "C" {
             int materialNum = 0;
             VRMMaterial *material = nullptr;
 
+            int pmxBoneNum = 0;
+            VRMPmxBoneTransform *pmxBones = nullptr;
+
             VRMMetadata() {
             }
 
@@ -335,6 +348,8 @@ extern "C" {
                 pmxRigidBodies = nullptr;
                 delete[] pmxJoints;
                 pmxJoints = nullptr;
+                delete[] pmxBones;
+                pmxBones = nullptr;
                 if (blendShapeGroup) {
                     delete[] blendShapeGroup;
                     blendShapeGroup = nullptr;
@@ -368,6 +383,9 @@ extern "C" {
                 p->pmxJointNum = pmxJointNum;
                 p->pmxJoints = new VRMPmxJoint[pmxJointNum];
                 for (int i = 0; i < pmxJointNum; ++i) p->pmxJoints[i] = pmxJoints[i];
+                p->pmxBoneNum = pmxBoneNum;
+                p->pmxBones = new VRMPmxBoneTransform[pmxBoneNum];
+                for (int i = 0; i < pmxBoneNum; ++i) p->pmxBones[i] = pmxBones[i];
 
                 for (int i=0; i<sizeof(humanoidBone)/sizeof(humanoidBone[0]); ++i){
 					p->humanoidBone[i] = humanoidBone[i];

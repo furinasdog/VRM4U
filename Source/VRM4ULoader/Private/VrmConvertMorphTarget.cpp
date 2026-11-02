@@ -61,7 +61,9 @@ namespace {
 	{
 		Morph->PopulateDeltas(Deltas, LODIndex, Sections);
 	}
-#else
+#endif
+#if !WITH_EDITOR || WITH_DEV_AUTOMATION_TESTS
+	// Compile the runtime path into development tests as well as packaged builds.
 	void LocalPopulateDeltas(USkeletalMesh* sk, UMorphTarget * Morph, const TArray<FMorphTargetDelta> & Deltas, const int32 LODIndex, const bool bCompareNormal = false, const bool bGeneratedByReductionSetting = false, const float PositionThreshold = THRESH_POINTS_ARE_NEAR)
 	{
 
@@ -371,32 +373,8 @@ bool VRMConverter::ConvertMorphTarget(UVrmAssetListObject *vrmAssetList) {
 #endif
 
 			if (mt->HasValidData()) {
-				{
-					FMorphTargetLODModel MorphLODModel;
-					MorphLODModel.Reset();
-					MorphLODModel.NumBaseMeshVerts = MorphDeltas.Num();
-					MorphLODModel.SectionIndices.Add(0);
-					MorphLODModel.Vertices = MorphDeltas;
-#if !UE_VERSION_OLDER_THAN(5,0,0)
-					MorphLODModel.NumVertices = MorphDeltas.Num();
-#endif
-
-#if	UE_VERSION_OLDER_THAN(5,0,0)
-					if (mt->MorphLODModels.IsValidIndex(0) == false) {
-						mt->MorphLODModels.Add(MorphLODModel);
-					} else {
-						mt->MorphLODModels[0] = MorphLODModel;
-					}
-#else
-					if (mt->GetMorphLODModels().IsValidIndex(0) == false) {
-						mt->GetMorphLODModels().Add(MorphLODModel);
-					} else {
-						mt->GetMorphLODModels()[0] = MorphLODModel;
-					}
-#endif
-
-					mt->BaseSkelMesh = sk;
-				}
+				// Preserve PopulateDeltas' section coverage; other sections also use these morphs.
+				mt->BaseSkelMesh = sk;
 				MorphTargetList.Add(mt);
 				MorphNameToTargetMap.Add(morphName, mt); // UE5.8用: マッピングを追加
 			}
@@ -722,6 +700,66 @@ bool FVrmRuntimeMorphMetadataTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Repeated registration is safe"), EnsureMorphCurveMetaData(Skeleton, Name));
 	TestTrue(TEXT("Existing material flag is retained"), Skeleton->GetCurveMetaData(Name)->Type.bMaterial);
 	TestEqual(TEXT("No duplicate curve"), Skeleton->GetNumCurveMetaData(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVrmRuntimeMorphSectionCoverageTest, "VRM4U.PMX.RuntimeMorphSectionCoverage",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)
+bool FVrmRuntimeMorphSectionCoverageTest::RunTest(const FString& Parameters)
+{
+	USkeletalMesh* Mesh = NewObject<USkeletalMesh>();
+	Mesh->AllocateResourceForRendering();
+	Mesh->GetResourceForRendering()->LODRenderData.Add(new FSkeletalMeshLODRenderData());
+	auto& Sections = Mesh->GetResourceForRendering()->LODRenderData[0].RenderSections;
+	Sections.SetNum(42);
+	for (int32 Index = 0; Index < Sections.Num(); ++Index) {
+		Sections[Index].BaseVertexIndex = Index * 4;
+		Sections[Index].NumVertices = 4;
+	}
+
+	// Nonadjacent sections model separate face, overlay, lashes, sclera and eye shadow.
+	const TArray<int32> ExpectedSections = { 0, 1, 2, 3, 41 };
+	const FVector2D EyeWeights[] = { {1, 1}, {0.5, 0.25}, {0.5, 0}, {0, 0.5} };
+	for (int32 CaseIndex = 0; CaseIndex < UE_ARRAY_COUNT(EyeWeights); ++CaseIndex) {
+		const FVector2D Weights = EyeWeights[CaseIndex];
+		TArray<FMorphTargetDelta> Deltas;
+		for (int32 SectionIndex : ExpectedSections) {
+			for (int32 Side = 0; Side < 2; ++Side) {
+				const float Weight = Side == 0 ? Weights.X : Weights.Y;
+				if (Weight == 0) continue;
+				FMorphTargetDelta Delta = {};
+				Delta.SourceIdx = SectionIndex * 4 + Side;
+				Delta.PositionDelta = FVector3f(0, 0, 0.4f * Weight);
+				Deltas.Insert(Delta, 0); // The production helper must sort the incoming indices.
+			}
+		}
+		FMorphTargetDelta Tiny = {};
+		Tiny.SourceIdx = 7 * 4;
+		Tiny.PositionDelta = FVector3f(0, 0, THRESH_POINTS_ARE_NEAR * 0.5f);
+		Deltas.Add(Tiny);
+
+		UMorphTarget* Morph = NewObject<UMorphTarget>(Mesh);
+		LocalPopulateDeltas(Mesh, Morph, Deltas, 0); // Actual non-Editor implementation, without Build().
+		TestTrue(TEXT("Runtime target retains valid deltas"), Morph->HasValidData());
+		const FMorphTargetLODModel& LOD = Morph->GetMorphLODModels()[0];
+		TestEqual(TEXT("Input count keeps the native NumBaseMeshVerts semantics"), LOD.NumBaseMeshVerts, Deltas.Num());
+		TestEqual(TEXT("Exactly the moving sections are retained"), LOD.SectionIndices.Num(), ExpectedSections.Num());
+		for (int32 SectionIndex : ExpectedSections)
+			TestTrue(FString::Printf(TEXT("Case %d: section %d participates in morph rendering"), CaseIndex, SectionIndex), Morph->HasDataForSection(0, SectionIndex));
+		TestFalse(TEXT("An untouched section does not acquire morph data"), Morph->HasDataForSection(0, 4));
+		TestFalse(TEXT("Subthreshold section follows the unchanged native filter"), Morph->HasDataForSection(0, 7));
+		TestEqual(TEXT("Filtering only removes the native subthreshold delta"), LOD.Vertices.Num(), Deltas.Num() - 1);
+		for (int32 Index = 1; Index < LOD.Vertices.Num(); ++Index)
+			TestTrue(TEXT("Runtime SourceIdx values remain sorted"), LOD.Vertices[Index - 1].SourceIdx < LOD.Vertices[Index].SourceIdx);
+	}
+
+	UMorphTarget* LashesOnly = NewObject<UMorphTarget>(Mesh);
+	FMorphTargetDelta LashDelta = {};
+	LashDelta.SourceIdx = 2 * 4;
+	LashDelta.PositionDelta = FVector3f(0, 0, 0.2f);
+	LocalPopulateDeltas(Mesh, LashesOnly, { LashDelta }, 0);
+	TestTrue(TEXT("A nonzero-only section participates"), LashesOnly->HasDataForSection(0, 2));
+	TestFalse(TEXT("Section zero is never added unless it moves"), LashesOnly->HasDataForSection(0, 0));
 	return true;
 }
 #endif

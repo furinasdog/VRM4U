@@ -168,6 +168,13 @@ bool VRMConverter::NormalizeBoneName(const aiScene *mScenePtr) {
 					name = TCHAR_TO_UTF8(*str);
 				}
 			}
+			if (meta->pmxBones) {
+				for (int b = 0; b < meta->pmxBoneNum; ++b) {
+					auto& name = meta->pmxBones[b].boneName;
+					if (name.length == 0) continue;
+					name = TCHAR_TO_UTF8(*VRMUtil::MakeName(UTF8_TO_TCHAR(name.C_Str()), true));
+				}
+			}
 		}
 	}
 
@@ -268,6 +275,7 @@ bool FVrmPmxBoneNameTest::RunTest(const FString& Parameters) {
 		auto Mesh = MakeUnique<aiMesh>();
 		auto SkinBone = MakeUnique<aiBone>();
 		TUniquePtr<VRM::VRMPmxRigidBody[]> Bodies(new VRM::VRMPmxRigidBody[2]);
+		TUniquePtr<VRM::VRMPmxBoneTransform[]> PmxBones(new VRM::VRMPmxBoneTransform[2]);
 		aiNode* Children[]{BoneNode.Get()};
 		aiMesh* Meshes[]{Mesh.Get()};
 		aiBone* SkinBones[]{SkinBone.Get()};
@@ -281,6 +289,9 @@ bool FVrmPmxBoneNameTest::RunTest(const FString& Parameters) {
 		SkinBone->mName = TCHAR_TO_UTF8(*Original);
 		Meta->pmxRigidBodyNum = 2;
 		Meta->pmxRigidBodies = Bodies.Get();
+		Meta->pmxBoneNum = 2; Meta->pmxBones = PmxBones.Get();
+		PmxBones[0].boneName = TCHAR_TO_UTF8(*Original);
+		PmxBones[1].boneName = "root"; PmxBones[1].grantIndex = 0; PmxBones[1].flags = 0x100;
 		Bodies[0].name = TCHAR_TO_UTF8(*Original);
 		Bodies[0].boneName = TCHAR_TO_UTF8(*Original);
 		Bodies[0].boneIndex = 7;
@@ -298,11 +309,14 @@ bool FVrmPmxBoneNameTest::RunTest(const FString& Parameters) {
 		TestEqual(Label + TEXT(" source bone index is preserved"), Bodies[0].boneIndex, 7);
 		TestEqual(Label + TEXT(" rigid body display name is preserved"), FString(UTF8_TO_TCHAR(Bodies[0].name.C_Str())), Original);
 		TestTrue(Label + TEXT(" unbound body keeps an empty bone reference"), Bodies[1].boneName.length == 0);
+		TestEqual(Label + TEXT(" append references use the same normalized table"), FString(UTF8_TO_TCHAR(PmxBones[0].boneName.C_Str())), Expected);
+		TestEqual(Label + TEXT(" append source indices survive normalization"), PmxBones[1].grantIndex, 0);
 		// Assimp DLL destructors must not release UE-allocated objects or borrowed arrays.
 		Scene->mRootNode = nullptr; Scene->mMeshes = nullptr; Scene->mNumMeshes = 0; Scene->mVRMMeta = nullptr;
 		RootNode->mChildren = nullptr; RootNode->mNumChildren = 0;
 		Mesh->mBones = nullptr; Mesh->mNumBones = 0;
 		Meta->pmxRigidBodies = nullptr; Meta->pmxRigidBodyNum = 0;
+		Meta->pmxBones = nullptr; Meta->pmxBoneNum = 0;
 	}
 	return true;
 }

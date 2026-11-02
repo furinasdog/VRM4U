@@ -98,11 +98,20 @@ namespace {
     static void PersistPmxPhysics(UVrmAssetListObject* Asset, const VRM::VRMMetadata* Meta) {
         if (!Asset) return;
         Asset->PmxPhysicsData = nullptr;
-        if (!Meta || Meta->pmxRigidBodyNum <= 0 || Meta->pmxRigidBodyNum > 16384 || !Meta->pmxRigidBodies
-            || Meta->pmxJointNum < 0 || Meta->pmxJointNum > 32768 || (Meta->pmxJointNum && !Meta->pmxJoints)) return;
+        if (!Meta || Meta->pmxRigidBodyNum < 0 || Meta->pmxRigidBodyNum > 16384 || (Meta->pmxRigidBodyNum && !Meta->pmxRigidBodies)
+            || Meta->pmxJointNum < 0 || Meta->pmxJointNum > 32768 || (Meta->pmxJointNum && !Meta->pmxJoints)
+            || Meta->pmxBoneNum < 0 || Meta->pmxBoneNum > 65535 || (Meta->pmxBoneNum && !Meta->pmxBones)
+            || (!Meta->pmxRigidBodyNum && !Meta->pmxBoneNum)) return;
         auto* Data = NewObject<UVrmPmxPhysicsData>(Asset);
         Data->ModelScale = VRMConverter::Options::Get().GetModelScale();
         const auto Vector = [](const VRM::vec3 V) { return FVector(V[0], V[1], V[2]); };
+        for (int32 I = 0; I < Meta->pmxBoneNum; ++I) {
+            const auto& S = Meta->pmxBones[I];
+            auto& D = Data->BoneTransforms.AddDefaulted_GetRef();
+            D.BoneName = FName(UTF8_TO_TCHAR(S.boneName.C_Str()));
+            D.SourceParentIndex = S.parentIndex; D.DeformLayer = S.deformLayer; D.Flags = S.flags;
+            D.AppendSourceIndex = S.grantIndex; D.AppendWeight = S.grantWeight;
+        }
         for (int32 I = 0; I < Meta->pmxRigidBodyNum; ++I) {
             const auto& S = Meta->pmxRigidBodies[I];
             auto& D = Data->RigidBodies.AddDefaulted_GetRef();
@@ -3081,6 +3090,11 @@ bool FPmxPhysicsPersistenceTest::RunTest(const FString& Parameters)
     VRM::VRMMetadata Meta;
     Meta.pmxRigidBodyNum = 1; Meta.pmxRigidBodies = new VRM::VRMPmxRigidBody[1];
     Meta.pmxJointNum = 1; Meta.pmxJoints = new VRM::VRMPmxJoint[1];
+    Meta.pmxBoneNum = 2; Meta.pmxBones = new VRM::VRMPmxBoneTransform[2];
+    Meta.pmxBones[0].boneName = "root";
+    Meta.pmxBones[1].boneName = "append"; Meta.pmxBones[1].parentIndex = 0;
+    Meta.pmxBones[1].grantIndex = 0; Meta.pmxBones[1].grantWeight = -.6f;
+    Meta.pmxBones[1].flags = 0x1380; Meta.pmxBones[1].deformLayer = -7;
     auto& B = Meta.pmxRigidBodies[0];
     B.name = aiString("hair"); B.boneName = aiString("head"); B.boneIndex = 7;
     B.group = 13; B.mask = 0xff0f; B.physicsCalcType = 2; B.shape = 2;
@@ -3100,6 +3114,7 @@ bool FPmxPhysicsPersistenceTest::RunTest(const FString& Parameters)
     FObjectReader Load(Restored, Bytes);
     TestEqual(TEXT("Rigid data survives UObject serialization"), Restored->RigidBodies.Num(), 1);
     TestEqual(TEXT("Joint data survives UObject serialization"), Restored->Joints.Num(), 1);
+    TestEqual(TEXT("Source PMX bone order survives serialization"), Restored->BoneTransforms.Num(), 2);
     if (Restored->RigidBodies.IsEmpty() || Restored->Joints.IsEmpty()) return false;
     TestEqual(TEXT("Raw PMX allowed collision bits are retained without inversion"), Restored->RigidBodies[0].CollisionMask, int32(0xff0f));
     TestEqual(TEXT("Authored out-of-range damping is preserved by serialization"), Restored->RigidBodies[0].AngularDamping, 2.f);
@@ -3110,6 +3125,19 @@ bool FPmxPhysicsPersistenceTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Importer model scale is retained"), Restored->ModelScale, VRMConverter::Options::Get().GetModelScale());
     auto* Copy = NewObject<UVrmAssetListObject>(); Asset->CopyMember(Copy);
     TestEqual(TEXT("Asset copying retains physics data"), Copy->PmxPhysicsData, Asset->PmxPhysicsData);
+    if (Restored->BoneTransforms.Num() == 2)
+    {
+        const auto& Rule = Restored->BoneTransforms[1];
+        TestEqual(TEXT("Append source and parent indices remain independent"), Rule.AppendSourceIndex, 0);
+        TestEqual(TEXT("Append source parent survives serialization"), Rule.SourceParentIndex, 0);
+        TestEqual(TEXT("Local, move, rotate and after-physics flags are retained"), Rule.Flags, 0x1380);
+        TestEqual(TEXT("Negative append weights are retained"), Rule.AppendWeight, -.6f);
+        TestEqual(TEXT("Signed deform layer is retained"), Rule.DeformLayer, -7);
+    }
+    Meta.pmxRigidBodyNum = 0;
+    auto* AppendOnly = NewObject<UVrmAssetListObject>(); PersistPmxPhysics(AppendOnly, &Meta);
+    TestNotNull(TEXT("PMX without physical bodies retains its append rules"), AppendOnly->PmxPhysicsData);
+    if (AppendOnly->PmxPhysicsData) TestTrue(TEXT("Append-only assets do not invent rigid bodies"), AppendOnly->PmxPhysicsData->RigidBodies.IsEmpty());
     return true;
 }
 
