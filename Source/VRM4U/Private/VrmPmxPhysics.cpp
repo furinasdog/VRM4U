@@ -8,6 +8,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
+#include "Serialization/Archive.h"
 #endif
 
 #ifndef WITH_VRM4U_PMX_BULLET
@@ -125,7 +126,13 @@ struct FVrmPmxPhysics::FImpl
     float Accumulator = 0;
 #if WITH_VRM4U_PMX_BULLET
     MMDBulletPhysics::NativeContext* Context = nullptr;
-    ~FImpl() { if (Context) MMDBulletPhysicsDestroy(Context); }
+    ~FImpl()
+    {
+#if WITH_DEV_AUTOMATION_TESTS
+        QaEventsFinish(0);
+#endif
+        if (Context) MMDBulletPhysicsDestroy(Context);
+    }
 
     FTransform AnimatedBody(int32 I, const TArray<FTransform>& Pose, const FTransform& ToWorld) const
     {
@@ -169,6 +176,135 @@ struct FVrmPmxPhysics::FImpl
     MMDBulletPhysics::NativeConfig QaConfig{};
     TArray<FTransform> QaReference;
     FTransform QaInitialToWorld;
+    // Explicit development-only capture of calls crossing the native ABI, not a new simulation path.
+    FString QaEventsPath;
+    TUniquePtr<FArchive> QaEventsWriter;
+    uint64 QaEventsBytes = 0;
+    uint32 QaEventsCount = 0, QaEventsFrames = 0, QaEventsEnded = 0;
+    double QaEventsSeconds = 0;
+    static constexpr uint64 QaEventsMaxBytes = 128ull * 1024 * 1024;
+    static constexpr double QaEventsMaxSeconds = 90.;
+    static void QaEventsAppend(TArray<uint8>& Bytes, const void* Data, SIZE_T Size)
+    {
+        if (Size) Bytes.Append(static_cast<const uint8*>(Data), int32(Size));
+    }
+    void QaEventsFinish(uint32 Status)
+    {
+        if (!QaEventsWriter) return;
+        if (Status == 0 && QaEventsFrames != QaEventsEnded) Status = 4;
+        const uint32 Header[] = {7, 20};
+        const uint32 Counts[] = {Status, QaEventsFrames, QaEventsEnded, QaEventsCount};
+        const float Seconds = float(QaEventsSeconds);
+        QaEventsWriter->Serialize(const_cast<uint32*>(Header), sizeof(Header));
+        QaEventsWriter->Serialize(const_cast<uint32*>(Counts), sizeof(Counts));
+        QaEventsWriter->Serialize(const_cast<float*>(&Seconds), sizeof(Seconds));
+        QaEventsBytes += sizeof(Header) + sizeof(Counts) + sizeof(Seconds);
+        const bool bSaved = QaEventsWriter->Close() && !QaEventsWriter->IsError();
+        QaEventsWriter.Reset();
+        if (bSaved && Status == 0)
+        {
+            UE_LOG(LogTemp, Display, TEXT("PMX_QA_EVENTS saved=1 status=%u frames=%u ended=%u events=%u bytes=%llu elapsed=%.6f path=\"%s\""),
+                Status, QaEventsFrames, QaEventsEnded, QaEventsCount, QaEventsBytes, QaEventsSeconds, *QaEventsPath);
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning, TEXT("PMX_QA_EVENTS saved=%d status=%u frames=%u ended=%u events=%u bytes=%llu elapsed=%.6f path=\"%s\""),
+                bSaved, Status, QaEventsFrames, QaEventsEnded, QaEventsCount, QaEventsBytes, QaEventsSeconds, *QaEventsPath);
+        }
+    }
+    bool QaEventsRecord(uint32 Type, const void* Data, uint32 Size)
+    {
+        if (!QaEventsWriter) return false;
+        // Reserve the footer so a bounded capture is distinguishable from a truncated file.
+        if (QaEventsBytes + 8ull + Size + 28ull > QaEventsMaxBytes)
+        { QaEventsFinish(1); return false; }
+        uint32 Header[] = {Type, Size};
+        QaEventsWriter->Serialize(Header, sizeof(Header));
+        if (Size) QaEventsWriter->Serialize(const_cast<void*>(Data), Size);
+        QaEventsBytes += sizeof(Header) + Size;
+        ++QaEventsCount;
+        if (QaEventsWriter->IsError()) { QaEventsFinish(3); return false; }
+        return true;
+    }
+    void QaEventsStart(const TArray<MMDBulletPhysics::RigidBodySimulationData>& NativeBodies,
+        const TArray<MMDBulletPhysics::NativeJointData>& NativeJoints, const MMDBulletPhysics::NativeConfig& Config,
+        const TArray<FTransform>& Reference, const FTransform& ToWorld)
+    {
+        if (QaEventsPath.IsEmpty()) return;
+        TArray<uint8> Bytes;
+        const uint32 Header[] = {1, 0x01020304, uint32(Bodies.Num()), uint32(Parents.Num()), uint32(NativeJoints.Num()),
+            sizeof(MMDBulletPhysics::RigidBodySimulationData), sizeof(MMDBulletPhysics::NativeJointData), sizeof(MMDBulletPhysics::NativeConfig),
+            16, 1, 80, 1, MaximumSteps, uint32(QaEventsMaxBytes), uint32(QaEventsMaxSeconds), 0};
+        const float Scalars[] = {FixedStep, ComponentScale, 0, -9.8f, 0};
+        QaEventsAppend(Bytes, Header, sizeof(Header)); QaEventsAppend(Bytes, Scalars, sizeof(Scalars));
+        QaEventsAppend(Bytes, &Config, sizeof(Config));
+        QaEventsAppend(Bytes, NativeBodies.GetData(), NativeBodies.Num() * sizeof(MMDBulletPhysics::RigidBodySimulationData));
+        QaEventsAppend(Bytes, NativeJoints.GetData(), NativeJoints.Num() * sizeof(MMDBulletPhysics::NativeJointData));
+        QaEventsAppend(Bytes, Parents.GetData(), Parents.Num() * sizeof(int32));
+        QaEventsAppend(Bytes, Bones.GetData(), Bones.Num() * sizeof(int32));
+        const auto Matrices = [&](const TArray<FTransform>& Values)
+        {
+            for (const FTransform& T : Values)
+            {
+                float M[16];
+                if (!WriteNative(T, M)) return false;
+                QaEventsAppend(Bytes, M, sizeof(M));
+            }
+            return true;
+        };
+        if (!Matrices(Reference) || !Matrices(BodyOffsets) || !Matrices({ToWorld}))
+        { UE_LOG(LogTemp, Warning, TEXT("PMX_QA_EVENTS saved=0 invalid_metadata path=\"%s\""), *QaEventsPath); return; }
+        if (uint64(Bytes.Num()) + 44ull > QaEventsMaxBytes
+            || !IFileManager::Get().MakeDirectory(*FPaths::GetPath(QaEventsPath), true))
+        { UE_LOG(LogTemp, Warning, TEXT("PMX_QA_EVENTS saved=0 metadata_or_directory path=\"%s\""), *QaEventsPath); return; }
+        QaEventsWriter.Reset(IFileManager::Get().CreateFileWriter(*QaEventsPath));
+        if (!QaEventsWriter)
+        { UE_LOG(LogTemp, Warning, TEXT("PMX_QA_EVENTS saved=0 open_failed path=\"%s\""), *QaEventsPath); return; }
+        ANSICHAR Magic[8] = {'P','M','X','U','E','E','0','1'};
+        QaEventsWriter->Serialize(Magic, sizeof(Magic)); QaEventsBytes = sizeof(Magic);
+        if (QaEventsRecord(0, Bytes.GetData(), Bytes.Num()))
+            UE_LOG(LogTemp, Display, TEXT("PMX_QA_EVENTS recording=1 max_bytes=%llu max_seconds=90 path=\"%s\""), QaEventsMaxBytes, *QaEventsPath);
+    }
+    void QaEventsSet(int32 Count, const float* Matrices, const int32* Indices, bool bReset)
+    {
+        if (!QaEventsWriter) return;
+        TArray<uint8> Bytes;
+        const uint32 Header[] = {uint32(Count), uint32(bReset)};
+        QaEventsAppend(Bytes, Header, sizeof(Header)); QaEventsAppend(Bytes, Indices, Count * sizeof(int32));
+        QaEventsAppend(Bytes, Matrices, Count * 16 * sizeof(float));
+        QaEventsRecord(1, Bytes.GetData(), Bytes.Num());
+    }
+    void QaEventsReset(uint32 Seed) { QaEventsRecord(2, &Seed, sizeof(Seed)); }
+    void QaEventsStep(float Delta) { QaEventsRecord(3, &Delta, sizeof(Delta)); }
+    void QaEventsShift(int32 Index, const float* Delta)
+    {
+        if (!QaEventsWriter) return;
+        TArray<uint8> Bytes;
+        QaEventsAppend(Bytes, &Index, sizeof(Index)); QaEventsAppend(Bytes, Delta, 3 * sizeof(float));
+        QaEventsRecord(4, Bytes.GetData(), Bytes.Num());
+    }
+    void QaEventsBegin(float Delta)
+    {
+        if (!QaEventsWriter) return;
+        if (QaEventsSeconds + Delta > QaEventsMaxSeconds) { QaEventsFinish(2); return; }
+        QaEventsSeconds += Delta;
+        ++QaEventsFrames;
+        TArray<uint8> Bytes;
+        QaEventsAppend(Bytes, &QaEventsFrames, sizeof(QaEventsFrames)); QaEventsAppend(Bytes, &Delta, sizeof(Delta));
+        QaEventsRecord(5, Bytes.GetData(), Bytes.Num());
+    }
+    void QaEventsEnd(int32 Steps, uint32 Reason)
+    {
+        if (!QaEventsWriter) return;
+        TArray<float> Snapshot;
+        Snapshot.SetNumUninitialized(AllIndices.Num() * 16);
+        MMDBulletPhysicsGetRigidBodyWorldTransforms(Context, AllIndices.Num(), AllIndices.GetData(), Snapshot.GetData());
+        TArray<uint8> Bytes;
+        const uint32 Header[] = {QaEventsFrames, uint32(Steps), Reason, uint32(AllIndices.Num())};
+        QaEventsAppend(Bytes, Header, sizeof(Header)); QaEventsAppend(Bytes, Snapshot.GetData(), Snapshot.Num() * sizeof(float));
+        if (QaEventsRecord(6, Bytes.GetData(), Bytes.Num())) ++QaEventsEnded;
+    }
+
     void QaDump(const TArray<FTransform>& Animated, const FTransform& ToWorld)
     {
         if (QaDumpPath.IsEmpty() || QaElapsed < 14.) return;
@@ -291,6 +427,12 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
     TUniquePtr<FImpl> State = MakeUnique<FImpl>();
 #if WITH_DEV_AUTOMATION_TESTS
     State->bQaTrace = FParse::Param(FCommandLine::Get(), TEXT("PmxQaTrace"));
+    FParse::Value(FCommandLine::Get(), TEXT("PmxQaEvents="), State->QaEventsPath);
+    if (!State->QaEventsPath.IsEmpty() && (FPaths::IsRelative(State->QaEventsPath) || !State->QaEventsPath.EndsWith(TEXT(".bin"))))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("PMX_QA_EVENTS rejected: an absolute .bin path is required."));
+        State->QaEventsPath.Reset();
+    }
     FParse::Value(FCommandLine::Get(), TEXT("PmxQaDump="), State->QaDumpPath);
     if (!State->QaDumpPath.IsEmpty() && (FPaths::IsRelative(State->QaDumpPath) || !State->QaDumpPath.EndsWith(TEXT(".bin"))))
     {
@@ -395,6 +537,9 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
 #endif
     MMDBulletPhysicsBuildRigidBodies(State->Context, NativeBodies.GetData(), NativeBodies.Num());
     MMDBulletPhysicsBuildJoints(State->Context, NativeJoints.GetData(), NativeJoints.Num());
+#if WITH_DEV_AUTOMATION_TESTS
+    State->QaEventsStart(NativeBodies, NativeJoints, Config, RefPose, ComponentToWorld);
+#endif
     Impl = MoveTemp(State);
     if (!Reset(RefPose, ComponentToWorld)) { Impl.Reset(); Error = TEXT("Cannot initialize PMX body transforms."); return false; }
     return true;
@@ -409,7 +554,13 @@ bool FVrmPmxPhysics::Reset(const TArray<FTransform>& BoneComponentPose, const FT
     Matrices.SetNumUninitialized(Impl->Bodies.Num() * 16);
     for (int32 I = 0; I < Impl->Bodies.Num(); ++I)
         if (!WriteNative(Impl->AnimatedBody(I, BoneComponentPose, ComponentToWorld), Matrices.GetData() + I * 16)) return false;
+#if WITH_DEV_AUTOMATION_TESTS
+    Impl->QaEventsSet(Impl->AllIndices.Num(), Matrices.GetData(), Impl->AllIndices.GetData(), true);
+#endif
     MMDBulletPhysicsSetRigidBodyTransforms(Impl->Context, Impl->AllIndices.Num(), Matrices.GetData(), Impl->AllIndices.GetData(), true);
+#if WITH_DEV_AUTOMATION_TESTS
+    Impl->QaEventsReset(0);
+#endif
     MMDBulletPhysicsReset(Impl->Context, 0);
     Impl->PreviousPose = BoneComponentPose; Impl->PreviousComponentToWorld = ComponentToWorld; Impl->Accumulator = 0;
     return true;
@@ -428,6 +579,7 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
     if (!IsInitialized() || !FMath::IsFinite(DeltaSeconds) || DeltaSeconds < 0 || !Impl->ValidPose(BoneComponentPose, ComponentToWorld))
     { Error = TEXT("Invalid PMX physics frame input."); return false; }
 #if WITH_DEV_AUTOMATION_TESTS
+    Impl->QaEventsBegin(DeltaSeconds);
     if (!Impl->QaDumpPath.IsEmpty()) Impl->QaElapsed += DeltaSeconds;
     if (Impl->bQaTrace) { Impl->QaSentDelta = {}; Impl->QaActualDelta = {}; }
 #endif
@@ -435,6 +587,7 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
     {
         const bool bReset = Reset(BoneComponentPose, ComponentToWorld);
 #if WITH_DEV_AUTOMATION_TESTS
+        Impl->QaEventsEnd(0, bReset ? 1u : 2u);
         Impl->QaReport(DeltaSeconds, 0, bReset ? TEXT("long_frame") : TEXT("long_frame_failed"), BoneComponentPose, BoneComponentPose);
 #endif
         return bReset;
@@ -460,7 +613,13 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
 #if WITH_DEV_AUTOMATION_TESTS
         if (Impl->bQaTrace) Impl->QaMeasureTargets(KinematicMatrices);
 #endif
+#if WITH_DEV_AUTOMATION_TESTS
+        Impl->QaEventsSet(Impl->KinematicIndices.Num(), KinematicMatrices.GetData(), Impl->KinematicIndices.GetData(), false);
+#endif
         MMDBulletPhysicsSetRigidBodyTransforms(Impl->Context, Impl->KinematicIndices.Num(), KinematicMatrices.GetData(), Impl->KinematicIndices.GetData(), false);
+#if WITH_DEV_AUTOMATION_TESTS
+        Impl->QaEventsStep(FixedStep);
+#endif
         MMDBulletPhysicsStepSimulation(Impl->Context, FixedStep);
         TArray<FTransform> Dynamic;
         if (!Impl->ReadBodies(Impl->DynamicIndices, Dynamic))
@@ -501,6 +660,9 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
                 const float Shift[3] = {float(Delta.X), float(Delta.Y), float(Delta.Z)};
                 if (!FMath::IsFinite(Shift[0]) || !FMath::IsFinite(Shift[1]) || !FMath::IsFinite(Shift[2]))
                 { Reset(Animated, ComponentToWorld); Error = TEXT("PMX aligned-body position overflows native precision."); return false; }
+#if WITH_DEV_AUTOMATION_TESTS
+                Impl->QaEventsShift(I, Shift);
+#endif
                 MMDBulletPhysicsShiftRigidBodyPosition(Impl->Context, I, Shift);
             }
             else Resolved[Bone] = *Target;
@@ -509,6 +671,7 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
         { Reset(Animated, ComponentToWorld); Error = TEXT("Invalid PMX descendant pose; simulation reset."); return false; }
     }
 #if WITH_DEV_AUTOMATION_TESTS
+    Impl->QaEventsEnd(Steps, 0);
     Impl->QaDump(Animated, ComponentToWorld);
     Impl->QaReport(DeltaSeconds, Steps, TEXT("none"), Animated, Resolved);
 #endif
