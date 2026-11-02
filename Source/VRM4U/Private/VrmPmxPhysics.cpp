@@ -2,6 +2,13 @@
 #include "VrmPmxPhysics.h"
 #include "VrmPmxPhysicsData.h"
 #include "ReferenceSkeleton.h"
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
+#endif
 
 #ifndef WITH_VRM4U_PMX_BULLET
 #define WITH_VRM4U_PMX_BULLET 0
@@ -149,6 +156,115 @@ struct FVrmPmxPhysics::FImpl
             if (!ReadNative(Matrices.GetData() + I * 16, Result[I])) return false;
         return true;
     }
+#if WITH_DEV_AUTOMATION_TESTS
+    bool bQaTrace = false;
+    uint32 QaFrame = 0;
+    TArray<FName> QaBoneNames;
+    TArray<FTransform> QaAnimated, QaOutput;
+    TArray<float> QaTargets;
+    FString QaDumpPath;
+    double QaElapsed = 0;
+    TArray<MMDBulletPhysics::RigidBodySimulationData> QaNativeBodies;
+    TArray<MMDBulletPhysics::NativeJointData> QaNativeJoints;
+    MMDBulletPhysics::NativeConfig QaConfig{};
+    TArray<FTransform> QaReference;
+    FTransform QaInitialToWorld;
+    void QaDump(const TArray<FTransform>& Animated, const FTransform& ToWorld)
+    {
+        if (QaDumpPath.IsEmpty() || QaElapsed < 14.) return;
+        const FString Path = MoveTemp(QaDumpPath);
+        TArray<uint8> Bytes;
+        const auto Append = [&](const void* Data, int32 Size)
+        {
+            const int32 Start = Bytes.AddUninitialized(Size);
+            if (Size) FMemory::Memcpy(Bytes.GetData() + Start, Data, Size);
+        };
+        const auto Matrices = [&](const TArray<FTransform>& Transforms)
+        {
+            for (const FTransform& T : Transforms)
+            {
+                float Matrix[16];
+                if (!WriteNative(T, Matrix)) return false;
+                Append(Matrix, sizeof(Matrix));
+            }
+            return true;
+        };
+        const ANSICHAR Magic[8] = {'P','M','X','U','E','Q','0','1'};
+        // Header flags: component matrices use native reflected basis/metres; final body snapshot is world-space after Mode2 correction.
+        const uint32 Header[] = {1, 0x01020304, uint32(Bodies.Num()), uint32(Parents.Num()), uint32(QaNativeJoints.Num()),
+            sizeof(MMDBulletPhysics::RigidBodySimulationData), sizeof(MMDBulletPhysics::NativeJointData), sizeof(MMDBulletPhysics::NativeConfig), 16, 1, 80, MaximumSteps};
+        const float Scalars[] = {FixedStep, ComponentScale};
+        Append(Magic, sizeof(Magic)); Append(Header, sizeof(Header)); Append(Scalars, sizeof(Scalars)); Append(&QaElapsed, sizeof(QaElapsed));
+        Append(&QaConfig, sizeof(QaConfig));
+        Append(QaNativeBodies.GetData(), QaNativeBodies.Num() * sizeof(MMDBulletPhysics::RigidBodySimulationData));
+        Append(QaNativeJoints.GetData(), QaNativeJoints.Num() * sizeof(MMDBulletPhysics::NativeJointData));
+        Append(Parents.GetData(), Parents.Num() * sizeof(int32)); Append(Bones.GetData(), Bones.Num() * sizeof(int32));
+        bool bValid = Matrices(QaReference) && Matrices(BodyOffsets) && Matrices({QaInitialToWorld, ToWorld}) && Matrices(Animated);
+        TArray<float> Snapshot;
+        Snapshot.SetNumUninitialized(AllIndices.Num() * 16);
+        MMDBulletPhysicsGetRigidBodyWorldTransforms(Context, AllIndices.Num(), AllIndices.GetData(), Snapshot.GetData());
+        Append(Snapshot.GetData(), Snapshot.Num() * sizeof(float));
+        const bool bSaved = bValid && IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true)
+            && FFileHelper::SaveArrayToFile(Bytes, *Path);
+        UE_LOG(LogTemp, Display, TEXT("PMX_QA_DUMP saved=%d elapsed=%.6f bytes=%d bodies=%d joints=%d bones=%d path=\"%s\""),
+            bSaved, QaElapsed, Bytes.Num(), Bodies.Num(), QaNativeJoints.Num(), Parents.Num(), *Path);
+        QaNativeBodies.Reset(); QaNativeJoints.Reset(); QaReference.Reset();
+    }
+    struct FQaPoseDelta { double Position = 0, Angle = 0; int32 PositionBone = INDEX_NONE, AngleBone = INDEX_NONE; };
+    struct FQaTargetDelta { double Position = 0, Basis = 0; int32 PositionBody = INDEX_NONE, BasisBody = INDEX_NONE; };
+    FQaTargetDelta QaSentDelta, QaActualDelta;
+    FQaPoseDelta QaMeasurePose(const TArray<FTransform>& Now, const TArray<FTransform>& Before, bool bLocal) const
+    {
+        FQaPoseDelta Result;
+        if (Now.Num() != Before.Num()) return Result;
+        for (int32 I = 0; I < Now.Num(); ++I)
+        {
+            const int32 P = Parents[I];
+            const FTransform A = bLocal && P != INDEX_NONE ? Now[I].GetRelativeTransform(Now[P]) : Now[I];
+            const FTransform B = bLocal && P != INDEX_NONE ? Before[I].GetRelativeTransform(Before[P]) : Before[I];
+            const double Position = FVector::Distance(A.GetLocation(), B.GetLocation());
+            const FQuat Relative = (A.GetRotation().GetNormalized() * B.GetRotation().GetNormalized().Inverse()).GetNormalized();
+            const double Angle = FMath::RadiansToDegrees(2. * FMath::Atan2(FVector(Relative.X, Relative.Y, Relative.Z).Length(), FMath::Abs(Relative.W)));
+            if (Position > Result.Position) { Result.Position = Position; Result.PositionBone = I; }
+            if (Angle > Result.Angle) { Result.Angle = Angle; Result.AngleBone = I; }
+        }
+        return Result;
+    }
+    void QaMeasureTargets(const TArray<float>& Target)
+    {
+        TArray<float> Actual;
+        Actual.SetNumUninitialized(Target.Num());
+        MMDBulletPhysicsGetRigidBodyWorldTransforms(Context, KinematicIndices.Num(), KinematicIndices.GetData(), Actual.GetData());
+        const auto Measure = [&](const TArray<float>& Before, FQaTargetDelta& Result)
+        {
+            if (Before.Num() != Target.Num()) return;
+            for (int32 K = 0; K < KinematicIndices.Num(); ++K)
+            {
+                const float* A = Target.GetData() + K * 16, * B = Before.GetData() + K * 16;
+                const double Position = FVector(double(A[12]) - B[12], double(A[13]) - B[13], double(A[14]) - B[14]).Length() * 100.;
+                double Basis = 0;
+                for (int32 Row = 0; Row < 3; ++Row)
+                    Basis = FMath::Max(Basis, FVector(double(A[Row]) - B[Row], double(A[Row + 4]) - B[Row + 4], double(A[Row + 8]) - B[Row + 8]).Length());
+                if (Position > Result.Position) { Result.Position = Position; Result.PositionBody = KinematicIndices[K]; }
+                if (Basis > Result.Basis) { Result.Basis = Basis; Result.BasisBody = KinematicIndices[K]; }
+            }
+        };
+        Measure(QaTargets, QaSentDelta); Measure(Actual, QaActualDelta);
+        QaTargets = Target;
+    }
+    void QaReport(float Delta, int32 Steps, const TCHAR* ResetReason, const TArray<FTransform>& Animated, const TArray<FTransform>& Output)
+    {
+        if (!bQaTrace) return;
+        const FQaPoseDelta A = QaMeasurePose(Animated, QaAnimated, false), O = QaMeasurePose(Output, QaOutput, true);
+        const auto Name = [&](int32 Index) { return QaBoneNames.IsValidIndex(Index) ? QaBoneNames[Index].ToString() : FString(TEXT("-")); };
+        UE_LOG(LogTemp, Display, TEXT("PMX_QA frame=%u dt=%.9g steps=%d reset=%s anim_cm=%.9g anim_p=%d anim_deg=%.9g anim_r=%d sent_cm=%.9g sent_pbody=%d sent_basis=%.9g sent_rbody=%d actual_cm=%.9g actual_pbody=%d actual_basis=%.9g actual_rbody=%d out_cm=%.9g out_p=%d out_pname=\"%s\" out_deg=%.9g out_r=%d out_rname=\"%s\""),
+            ++QaFrame, Delta, Steps, ResetReason, A.Position, A.PositionBone, A.Angle, A.AngleBone,
+            QaSentDelta.Position, QaSentDelta.PositionBody, QaSentDelta.Basis, QaSentDelta.BasisBody,
+            QaActualDelta.Position, QaActualDelta.PositionBody, QaActualDelta.Basis, QaActualDelta.BasisBody,
+            O.Position, O.PositionBone, *Name(O.PositionBone), O.Angle, O.AngleBone, *Name(O.AngleBone));
+        QaAnimated = Animated; QaOutput = Output;
+    }
+#endif
 #endif
 };
 
@@ -173,6 +289,15 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
 #else
     if (!ValidateData(Data, Error)) return false;
     TUniquePtr<FImpl> State = MakeUnique<FImpl>();
+#if WITH_DEV_AUTOMATION_TESTS
+    State->bQaTrace = FParse::Param(FCommandLine::Get(), TEXT("PmxQaTrace"));
+    FParse::Value(FCommandLine::Get(), TEXT("PmxQaDump="), State->QaDumpPath);
+    if (!State->QaDumpPath.IsEmpty() && (FPaths::IsRelative(State->QaDumpPath) || !State->QaDumpPath.EndsWith(TEXT(".bin"))))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("PMX_QA_DUMP rejected: an absolute .bin path is required."));
+        State->QaDumpPath.Reset();
+    }
+#endif
     if (!UniformScale(ComponentToWorld, State->ComponentScale) || Ref.GetNum() == 0)
     { Error = TEXT("PMX physics needs a valid skeleton and positive uniform component scale."); return false; }
     TArray<FTransform> RefPose;
@@ -182,6 +307,9 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
         if (Parent < INDEX_NONE || Parent >= I || !ValidTransform(Ref.GetRefBonePose()[I]))
         { Error = TEXT("Invalid PMX reference skeleton."); return false; }
         State->Parents.Add(Parent);
+#if WITH_DEV_AUTOMATION_TESTS
+        if (State->bQaTrace) State->QaBoneNames.Add(Ref.GetBoneName(I));
+#endif
         RefPose.Add(Parent == INDEX_NONE ? Ref.GetRefBonePose()[I] : Ref.GetRefBonePose()[I] * RefPose[Parent]);
     }
     State->Bodies = Data.RigidBodies;
@@ -258,6 +386,13 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
     Config.springRotationDamping = .5f;
     Config.lockedTranslationReinforce = 1;
     MMDBulletPhysicsSetConfig(State->Context, &Config);
+#if WITH_DEV_AUTOMATION_TESTS
+    if (!State->QaDumpPath.IsEmpty())
+    {
+        State->QaNativeBodies = NativeBodies; State->QaNativeJoints = NativeJoints;
+        State->QaReference = RefPose; State->QaInitialToWorld = ComponentToWorld; State->QaConfig = Config;
+    }
+#endif
     MMDBulletPhysicsBuildRigidBodies(State->Context, NativeBodies.GetData(), NativeBodies.Num());
     MMDBulletPhysicsBuildJoints(State->Context, NativeJoints.GetData(), NativeJoints.Num());
     Impl = MoveTemp(State);
@@ -292,7 +427,18 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
 #else
     if (!IsInitialized() || !FMath::IsFinite(DeltaSeconds) || DeltaSeconds < 0 || !Impl->ValidPose(BoneComponentPose, ComponentToWorld))
     { Error = TEXT("Invalid PMX physics frame input."); return false; }
-    if (DeltaSeconds > .25f) return Reset(BoneComponentPose, ComponentToWorld);
+#if WITH_DEV_AUTOMATION_TESTS
+    if (!Impl->QaDumpPath.IsEmpty()) Impl->QaElapsed += DeltaSeconds;
+    if (Impl->bQaTrace) { Impl->QaSentDelta = {}; Impl->QaActualDelta = {}; }
+#endif
+    if (DeltaSeconds > .25f)
+    {
+        const bool bReset = Reset(BoneComponentPose, ComponentToWorld);
+#if WITH_DEV_AUTOMATION_TESTS
+        Impl->QaReport(DeltaSeconds, 0, bReset ? TEXT("long_frame") : TEXT("long_frame_failed"), BoneComponentPose, BoneComponentPose);
+#endif
+        return bReset;
+    }
     const TArray<FTransform> Animated = BoneComponentPose;
     Impl->Accumulator += FMath::Min(DeltaSeconds, FixedStep * MaximumSteps);
     const int32 Steps = FMath::Min(FMath::FloorToInt(Impl->Accumulator / FixedStep), MaximumSteps);
@@ -311,6 +457,9 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
             if (!WriteNative(Interpolated, KinematicMatrices.GetData() + K * 16))
             { Error = TEXT("PMX animation transform overflows native precision."); return false; }
         }
+#if WITH_DEV_AUTOMATION_TESTS
+        if (Impl->bQaTrace) Impl->QaMeasureTargets(KinematicMatrices);
+#endif
         MMDBulletPhysicsSetRigidBodyTransforms(Impl->Context, Impl->KinematicIndices.Num(), KinematicMatrices.GetData(), Impl->KinematicIndices.GetData(), false);
         MMDBulletPhysicsStepSimulation(Impl->Context, FixedStep);
         TArray<FTransform> Dynamic;
@@ -359,6 +508,10 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
         if (!ValidTransform(Resolved[Bone]))
         { Reset(Animated, ComponentToWorld); Error = TEXT("Invalid PMX descendant pose; simulation reset."); return false; }
     }
+#if WITH_DEV_AUTOMATION_TESTS
+    Impl->QaDump(Animated, ComponentToWorld);
+    Impl->QaReport(DeltaSeconds, Steps, TEXT("none"), Animated, Resolved);
+#endif
     BoneComponentPose = MoveTemp(Resolved);
     Impl->PreviousPose = Animated; Impl->PreviousComponentToWorld = ComponentToWorld;
     return true;
