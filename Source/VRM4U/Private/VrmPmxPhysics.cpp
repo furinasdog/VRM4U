@@ -398,8 +398,8 @@ struct FVrmPmxPhysics::FImpl
         if (!bQaTrace) return;
         const FQaPoseDelta A = QaMeasurePose(Animated, QaAnimated, false), O = QaMeasurePose(Output, QaOutput, true);
         const auto Name = [&](int32 Index) { return QaBoneNames.IsValidIndex(Index) ? QaBoneNames[Index].ToString() : FString(TEXT("-")); };
-        UE_LOG(LogTemp, Display, TEXT("PMX_QA frame=%u dt=%.9g steps=%d reset=%s anim_cm=%.9g anim_p=%d anim_deg=%.9g anim_r=%d sent_cm=%.9g sent_pbody=%d sent_basis=%.9g sent_rbody=%d actual_cm=%.9g actual_pbody=%d actual_basis=%.9g actual_rbody=%d out_cm=%.9g out_p=%d out_pname=\"%s\" out_deg=%.9g out_r=%d out_rname=\"%s\""),
-            ++QaFrame, Delta, Steps, ResetReason, A.Position, A.PositionBone, A.Angle, A.AngleBone,
+        UE_LOG(LogTemp, Display, TEXT("PMX_QA frame=%u dt=%.9g steps=%d reset=%s anim_cm=%.9g anim_p=%d anim_pname=\"%s\" anim_deg=%.9g anim_r=%d anim_rname=\"%s\" sent_cm=%.9g sent_pbody=%d sent_basis=%.9g sent_rbody=%d actual_cm=%.9g actual_pbody=%d actual_basis=%.9g actual_rbody=%d out_cm=%.9g out_p=%d out_pname=\"%s\" out_deg=%.9g out_r=%d out_rname=\"%s\""),
+            ++QaFrame, Delta, Steps, ResetReason, A.Position, A.PositionBone, *Name(A.PositionBone), A.Angle, A.AngleBone, *Name(A.AngleBone),
             QaSentDelta.Position, QaSentDelta.PositionBody, QaSentDelta.Basis, QaSentDelta.BasisBody,
             QaActualDelta.Position, QaActualDelta.PositionBody, QaActualDelta.Basis, QaActualDelta.BasisBody,
             O.Position, O.PositionBone, *Name(O.PositionBone), O.Angle, O.AngleBone, *Name(O.AngleBone));
