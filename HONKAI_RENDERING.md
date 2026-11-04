@@ -57,3 +57,18 @@ The host prepares `Tools/UMTNativePlugin/build-static-ue144/bundled/UMTNativePlu
 The VRM spring path also validates raw-to-compact bone indices. Runtime PMX vertex morph registration works without opening an editor transaction through a null GEditor. Host animation proxies must register the inherited VRM4U proxy pointer and initialize the entire reference pose before applying targets.
 
 Tests under `VRM4U.PMX` cover original material properties, physical metadata persistence, coordinate basis, gravity, collision groups, mode-2 parent chains and finite damping compatibility. Real-model image and motion evidence belongs to the host project; those unit checks do not establish collision-free appearance or official-game fidelity.
+
+
+## 2026-11-04 fixed-step animation and display timing
+
+Kinematic targets sample animation at the actual fixed-step instant, including the
+accumulator phase and accepted frame-time cap. Previous animation is still
+updated on frames without a physics step. The native solver, collisions and
+Mode2 position alignment retain current-world snapshots.
+
+Dynamic output bones use previous/current native snapshots for display-only
+interpolation, one fixed step (1/60 second) behind. Interpolated poses never feed
+Mode2 alignment or native contacts. Reset invalidates display history; a zero-time
+evaluation retains the display phase. Native regression tests cover multiple
+render rates, a clipped/variable-delta sequence, zero-step display motion,
+unchanged native trajectories and current-parent Mode2 alignment.

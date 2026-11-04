@@ -122,6 +122,9 @@ struct FVrmPmxPhysics::FImpl
     TArray<FVrmPmxRigidBodyData> Bodies;
     TArray<int32> Bones, Parents, AllIndices, KinematicIndices, DynamicIndices;
     TArray<FTransform> BodyOffsets, BodyRest, PreviousPose;
+    // Display snapshots never participate in Mode2 alignment or solver feedback.
+    TArray<FTransform> RenderPreviousBodies, RenderCurrentBodies;
+    bool bRenderHistory = false;
     FTransform PreviousComponentToWorld;
     float ComponentScale = 1;
     float Accumulator = 0;
@@ -570,6 +573,8 @@ bool FVrmPmxPhysics::Reset(const TArray<FTransform>& BoneComponentPose, const FT
 #endif
     MMDBulletPhysicsReset(Impl->Context, 0);
     Impl->PreviousPose = BoneComponentPose; Impl->PreviousComponentToWorld = ComponentToWorld; Impl->Accumulator = 0;
+    if (!Impl->ReadBodies(Impl->DynamicIndices, Impl->RenderCurrentBodies)) return false;
+    Impl->RenderPreviousBodies = Impl->RenderCurrentBodies; Impl->bRenderHistory = false;
     return true;
 #else
     return false;
@@ -600,14 +605,18 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
         return bReset;
     }
     const TArray<FTransform> Animated = BoneComponentPose;
-    Impl->Accumulator += FMath::Min(DeltaSeconds, FixedStep * MaximumSteps);
+    const float AccumulatorBefore = Impl->Accumulator;
+    const float AcceptedDelta = FMath::Min(DeltaSeconds, FixedStep * MaximumSteps);
+    Impl->Accumulator += AcceptedDelta;
     const int32 Steps = FMath::Min(FMath::FloorToInt(Impl->Accumulator / FixedStep), MaximumSteps);
     Impl->Accumulator -= Steps * FixedStep;
     TArray<float> KinematicMatrices;
     KinematicMatrices.SetNumUninitialized(Impl->KinematicIndices.Num() * 16);
     for (int32 Step = 0; Step < Steps; ++Step)
     {
-        const float Alpha = float(Step + 1) / Steps;
+        // Sample animation at the actual fixed-step time, including a partially accumulated frame.
+        const float Alpha = AcceptedDelta > SMALL_NUMBER
+            ? FMath::Clamp(((Step + 1) * FixedStep - AccumulatorBefore) / AcceptedDelta, 0.f, 1.f) : 1.f;
         for (int32 K = 0; K < Impl->KinematicIndices.Num(); ++K)
         {
             const int32 I = Impl->KinematicIndices[K];
@@ -631,6 +640,9 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
         TArray<FTransform> Dynamic;
         if (!Impl->ReadBodies(Impl->DynamicIndices, Dynamic))
         { Reset(Animated, ComponentToWorld); Error = TEXT("Non-finite PMX body result; simulation reset."); return false; }
+        Impl->RenderPreviousBodies = MoveTemp(Impl->RenderCurrentBodies);
+        Impl->RenderCurrentBodies = MoveTemp(Dynamic);
+        Impl->bRenderHistory = true;
     }
     TArray<FTransform> Dynamic;
     if (!Impl->ReadBodies(Impl->DynamicIndices, Dynamic))
@@ -676,6 +688,35 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
         }
         if (!ValidTransform(Resolved[Bone]))
         { Reset(Animated, ComponentToWorld); Error = TEXT("Invalid PMX descendant pose; simulation reset."); return false; }
+    }
+    if (Impl->bRenderHistory && Impl->RenderPreviousBodies.Num() == Dynamic.Num())
+    {
+        // Interpolate display only, one fixed step behind. Native contacts and Mode2 used the current snapshot above.
+        const float RenderAlpha = FMath::Clamp(Impl->Accumulator / FixedStep, 0.f, 1.f);
+        Driven.Reset();
+        for (int32 K = 0; K < Impl->DynamicIndices.Num(); ++K)
+        {
+            const int32 I = Impl->DynamicIndices[K], Bone = Impl->Bones[I];
+            if (Bone == INDEX_NONE) continue;
+            FTransform Interpolated; Interpolated.Blend(Impl->RenderPreviousBodies[K], Dynamic[K], RenderAlpha);
+            FTransform Target = Impl->BoneFromBody(I, Interpolated, ComponentToWorld);
+            Target.SetScale3D(Animated[Bone].GetScale3D());
+            Driven.Add(Bone, Target);
+        }
+        for (int32 Bone = 0; Bone < Animated.Num(); ++Bone)
+        {
+            const int32 Parent = Impl->Parents[Bone];
+            const FTransform Local = Parent == INDEX_NONE ? Animated[Bone] : Animated[Bone].GetRelativeTransform(Animated[Parent]);
+            Resolved[Bone] = Parent == INDEX_NONE ? Local : Local * Resolved[Parent];
+            if (const auto* Target = Driven.Find(Bone))
+            {
+                const int32 I = Impl->DynamicIndices[DynamicSources[Bone]];
+                if (Impl->Bodies[I].Mode == 2) Resolved[Bone].SetRotation(Target->GetRotation());
+                else Resolved[Bone] = *Target;
+            }
+            if (!ValidTransform(Resolved[Bone]))
+            { Reset(Animated,ComponentToWorld); Error=TEXT("Invalid PMX display pose; simulation reset."); return false; }
+        }
     }
 #if WITH_DEV_AUTOMATION_TESTS
     Impl->QaEventsEnd(Steps, 0);
@@ -797,6 +838,111 @@ bool FVrmPmxCollisionGroupTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVrmPmxSubstepTimingTest, "VRM4U.PMX.SubstepTiming",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVrmPmxSubstepTimingTest::RunTest(const FString&)
+{
+#if WITH_VRM4U_PMX_BULLET
+    auto* Skeleton = NewObject<USkeleton>();
+    {
+        FReferenceSkeletonModifier Modifier(Skeleton);
+        Modifier.Add(FMeshBoneInfo(TEXT("root"), TEXT("root"), INDEX_NONE), FTransform::Identity);
+        Modifier.Add(FMeshBoneInfo(TEXT("head"), TEXT("head"), 0), FTransform(FVector(0,0,100)));
+    }
+    auto* Data = NewObject<UVrmPmxPhysicsData>(); Data->ModelScale = .1f;
+    auto& Head = Data->RigidBodies.AddDefaulted_GetRef();
+    Head.BoneName = TEXT("head"); Head.SourceBoneIndex = 1; Head.Mode = 0; Head.Shape = 0;
+    Head.Size = FVector(.2,0,0); Head.Position = FVector(0,10,0); Head.CollisionMask = 0;
+    TArray<TArray<float>> Cases;
+    for (int32 Rate : {24,30,60,72,90,120,144}) Cases.Add({1.f / Rate});
+    Cases.Add({1.f/144,1.f/90,0.f,1.f/24,1.f/60,.15f});
+    for (int32 Case = 0; Case < Cases.Num(); ++Case)
+    {
+        FString Error; FVrmPmxPhysics Physics;
+        if (!TestTrue(TEXT("A real native kinematic head initializes"),Physics.Initialize(*Data,Skeleton->GetReferenceSkeleton(),FTransform::Identity,Error))) return false;
+        double Time = 0, MaxPosition = 0, MaxAngle = 0;
+        int32 Completed = 0;
+        for (int32 Frame = 0; Frame < 240; ++Frame)
+        {
+            const float Delta = Cases[Case][Frame % Cases[Case].Num()];
+            Time += FMath::Min(Delta,FixedStep * MaximumSteps);
+            const FTransform Target(FRotator(0,Time*60.,0),FVector(Time*30.,0,100));
+            TArray<FTransform> Pose{FTransform::Identity,Target};
+            const float AccumulatorBefore = Physics.Impl->Accumulator;
+            Completed += FMath::Min(FMath::FloorToInt((AccumulatorBefore + FMath::Min(Delta,FixedStep*MaximumSteps))/FixedStep),MaximumSteps);
+            if (!Physics.Simulate(Delta,FTransform::Identity,Pose,Error)) { AddError(Error); return false; }
+            TArray<FTransform> Bodies;
+            if (!Physics.Impl->ReadBodies(Physics.Impl->AllIndices,Bodies) || Bodies.Num()!=1) { AddError(TEXT("Native head readback failed")); return false; }
+            const FTransform Actual = Physics.Impl->BoneFromBody(0,Bodies[0],FTransform::Identity);
+            const double SampleTime = double(Completed) * FixedStep;
+            const FTransform Expected(FRotator(0,SampleTime*60.,0),FVector(SampleTime*30.,0,100));
+            MaxPosition = FMath::Max(MaxPosition,FVector::Distance(Actual.GetLocation(),Expected.GetLocation()));
+            MaxAngle = FMath::Max(MaxAngle,FMath::RadiansToDegrees(Actual.GetRotation().AngularDistance(Expected.GetRotation())));
+        }
+        AddInfo(FString::Printf(TEXT("PMX_SUBSTEP_TIMING case=%d max_cm=%.6f max_deg=%.6f"),Case,MaxPosition,MaxAngle));
+        TestTrue(FString::Printf(TEXT("Case %d samples the actual fixed-step position"),Case),MaxPosition < .005);
+        TestTrue(FString::Printf(TEXT("Case %d samples the actual fixed-step rotation"),Case),MaxAngle < .02);
+    }
+#else
+    AddError(TEXT("Substep timing requires the native Bullet runtime."));
+#endif
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVrmPmxRenderInterpolationTest, "VRM4U.PMX.RenderInterpolation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVrmPmxRenderInterpolationTest::RunTest(const FString&)
+{
+#if WITH_VRM4U_PMX_BULLET
+    auto* Skeleton = NewObject<USkeleton>();
+    {
+        FReferenceSkeletonModifier Modifier(Skeleton);
+        Modifier.Add(FMeshBoneInfo(TEXT("root"),TEXT("root"),INDEX_NONE),FTransform::Identity);
+        Modifier.Add(FMeshBoneInfo(TEXT("dynamic"),TEXT("dynamic"),0),FTransform(FVector(0,0,100)));
+    }
+    auto* Data=NewObject<UVrmPmxPhysicsData>(); Data->ModelScale=.1f;
+    auto& Body=Data->RigidBodies.AddDefaulted_GetRef();
+    Body.BoneName=TEXT("dynamic"); Body.SourceBoneIndex=1; Body.Mode=1; Body.Shape=0;
+    Body.Size=FVector(.2,0,0); Body.Position=FVector(0,10,0); Body.Mass=1; Body.CollisionMask=0;
+    const TArray<FTransform> Animated{FTransform::Identity,FTransform(FVector(0,0,100))};
+    FString Error; FVrmPmxPhysics HighRate, Reference;
+    if (!HighRate.Initialize(*Data,Skeleton->GetReferenceSkeleton(),FTransform::Identity,Error)
+        || !Reference.Initialize(*Data,Skeleton->GetReferenceSkeleton(),FTransform::Identity,Error)) { AddError(Error); return false; }
+    int32 Completed=0, MovingZeroFrames=0;
+    double PreviousOutput=100;
+    TArray<FTransform> Native, PreviousNative;
+    for (int32 Frame=0;Completed<60 && Frame<200;++Frame)
+    {
+        const int32 Steps=FMath::FloorToInt((HighRate.Impl->Accumulator + 1.f/144.f)/FixedStep);
+        auto Pose=Animated;
+        if (!HighRate.Simulate(1.f/144.f,FTransform::Identity,Pose,Error) || !HighRate.Impl->ReadBodies(HighRate.Impl->AllIndices,Native))
+        { AddError(Error); return false; }
+        if (Frame>10 && Steps==0 && PreviousNative.Num()==Native.Num())
+        {
+            TestTrue(TEXT("Zero-step display leaves the real native body untouched"),Native[0].Equals(PreviousNative[0],1.e-8));
+            if (FMath::Abs(Pose[1].GetLocation().Z-PreviousOutput)>1.e-6) ++MovingZeroFrames;
+        }
+        Completed+=Steps; PreviousOutput=Pose[1].GetLocation().Z; PreviousNative=Native;
+    }
+    TestTrue(TEXT("High-rate frames interpolate the visible body while physics is idle"),MovingZeroFrames>50);
+    for (int32 Step=0;Step<Completed;++Step)
+    {
+        auto Pose=Animated;
+        if (!Reference.Simulate(FixedStep,FTransform::Identity,Pose,Error)) { AddError(Error); return false; }
+    }
+    TArray<FTransform> ReferenceNative;
+    if (!Reference.Impl->ReadBodies(Reference.Impl->AllIndices,ReferenceNative)) return false;
+    TestTrue(TEXT("Display interpolation does not change the native fixed-step trajectory"),
+        Native[0].Equals(ReferenceNative[0],.0001));
+    TestTrue(TEXT("Reset discards old display history"),HighRate.Reset(Animated,FTransform::Identity) && !HighRate.Impl->bRenderHistory);
+    auto Rest=Animated;
+    TestTrue(TEXT("Zero-time post-reset output is the current pose"),HighRate.Simulate(0,FTransform::Identity,Rest,Error) && Rest[1].Equals(Animated[1],.001));
+#else
+    AddError(TEXT("Display interpolation regression requires native Bullet."));
+#endif
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVrmPmxMode2ParentTest, "VRM4U.PMX.Mode2ParentChain",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FVrmPmxMode2ParentTest::RunTest(const FString& Parameters)
@@ -832,6 +978,8 @@ bool FVrmPmxMode2ParentTest::RunTest(const FString& Parameters)
             if (!TestTrue(TEXT("A physical parent and offset mode2 child initialize"), Physics.Initialize(*Data, Skeleton->GetReferenceSkeleton(), World, Error))) return false;
             for (const FTransform& ParentTarget : ParentTargets)
             {
+                // External native-state injection starts a new display history.
+                if (!Physics.Reset(Animated, World)) return false;
                 const FTransform ChildTarget(FRotator(-4, 15, 22), FVector(160, -80, 70));
                 const FTransform Targets[] = {Physics.Impl->BodyOffsets[0] * ParentTarget * World,
                     Physics.Impl->BodyOffsets[1] * ChildTarget * World};
@@ -863,8 +1011,10 @@ bool FVrmPmxMode2ParentTest::RunTest(const FString& Parameters)
                         Pose[2].GetRelativeTransform(Pose[1]).GetLocation().Equals(ChildLocal.GetLocation(), .001));
                     if (!Physics.Impl->ReadBodies(Physics.Impl->AllIndices, Bodies)) return false;
                     const FTransform SteppedChild = Physics.Impl->BoneFromBody(1, Bodies[1], World);
-                    TestTrue(TEXT("Current-world mode2 correction has no interpolated-snapshot position feedback"),
-                        SteppedChild.GetLocation().Equals(Pose[2].GetLocation(), .001));
+                    FTransform CurrentParent = Physics.Impl->BoneFromBody(0, Bodies[0], World);
+                    if (ParentMode == 2) CurrentParent.SetLocation(Animated[1].GetLocation());
+                    TestTrue(TEXT("Current-world mode2 correction has no display-interpolation feedback"),
+                        SteppedChild.GetLocation().Equals((ChildLocal * CurrentParent).GetLocation(), .001));
                 }
             }
         }

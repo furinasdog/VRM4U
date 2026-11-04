@@ -19,6 +19,7 @@ public:
         const FTransform& ComponentToWorld, FString& Error);
     bool Reset(const TArray<FTransform>& BoneComponentPose, const FTransform& ComponentToWorld);
     // Full mesh-bone-indexed component pose in and out, before converting to compact/local pose.
+    // Dynamic display poses interpolate one fixed step behind; constraint feedback uses current native states.
     bool Simulate(float DeltaSeconds, const FTransform& ComponentToWorld,
         TArray<FTransform>& BoneComponentPose, FString& Error);
     bool IsInitialized() const;
@@ -26,6 +27,8 @@ public:
 private:
 #if WITH_DEV_AUTOMATION_TESTS
     friend class FVrmPmxMode2ParentTest;
+    friend class FVrmPmxSubstepTimingTest;
+    friend class FVrmPmxRenderInterpolationTest;
 #endif
     struct FImpl;
     TUniquePtr<FImpl> Impl;
