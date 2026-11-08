@@ -1,3 +1,23 @@
+# VRM4U · HonkaiRendering 适配分支
+
+这是 [ruyo/VRM4U](https://github.com/ruyo/VRM4U) 的维护 fork，保留上游作者 Haruyoshi Yamamoto 的署名、许可证和提交历史。HonkaiRendering / HonkaiVTuber 使用 `honkai-rendering/ue5.8` 分支；本分支问题请提交到[本 fork 的 Issues](https://github.com/furinasdog/VRM4U/issues)，不要要求上游维护者支持本项目的改动。
+
+本分支验证范围为 **UE 5.8、Windows x64、PMX 运行时导入**。保留完整 PMX LOD0、透明度、双面标志、Toon/高光属性及 morph 元数据，并桥接原生 Bullet 物理。默认 30 Hz / 48 次求解；保留原始身体碰撞体，动态附件采用网格凸包。复杂接触、混合蒙皮及快速动作仍可能穿插，不能保证所有模型无误差。
+
+```powershell
+git clone --branch honkai-rendering/ue5.8 https://github.com/furinasdog/VRM4U.git Plugins/VRM4U
+```
+
+应用仓库已固定子模块版本，请使用宿主的 `git submodule update --init --recursive`，不要另外覆盖插件。不要用上游 Release DLL 替换本 fork 配套的 Assimp DLL/导入库。可选源码重建和原生物理依赖见 [适配与构建说明](HONKAI_RENDERING.md)；运行应用请下载 [HonkaiVTuber](https://github.com/furinasdog/HonkaiVTuber/releases/tag/v0.1.0)。
+
+- [贡献与验证](CONTRIBUTING.md)、[安全问题报告](SECURITY.md)、[社区行为准则](CODE_OF_CONDUCT.md)
+- 原始 [VRM4U MIT](LICENSE)、[Assimp BSD](LICENSE_assimp)、[Unity MMD Tools MIT](LICENSE_UMT) 许可保留各自归属。
+- 当前分支不包含上游示例角色；保留的历史提交可能包含历史示例资产。模型与贴图请按各自许可取得。
+
+## 上游历史文档
+
+以下保留上游原文；其中旧版引擎兼容表、下载入口和支持者属于上游，不能代替上述适配分支说明。
+
 # VRM4U
 
 [English Doc](https://github.com/ruyo/VRM4U/blob/master/README_en.md)

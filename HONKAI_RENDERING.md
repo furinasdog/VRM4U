@@ -48,7 +48,7 @@ UE 5.8 editor binaries running with `-game` have `WITH_EDITOR=1` but no `GEditor
 
 The existing Assimp PMX reader additionally exports raw rigid bodies and joints. `UVrmPmxPhysicsData` retains the original modes, units, collision-mask bits, limits and springs. The raw mask is passed directly to Bullet; it must not be complemented. Finite damping values outside [0,1] are retained in metadata and clamped only when constructing native bodies, matching Bullet's own behavior.
 
-`FVrmPmxPhysics` is an optional Windows adapter around the host's UMTNativePlugin fork and pinned Bullet source. It consumes a full mesh-indexed component-space animated pose and returns the complete simulated pose, including descendants and mode-2 local-position handling under a physical parent. It does not convert PMX joints into VRM0 spring chains. It uses fixed60Hz steps, bounded catch-up, long-frame reset, scale checks, and finite/index validation. Unsupported joint types fail explicitly.
+`FVrmPmxPhysics` is an optional Windows adapter around the host's UMTNativePlugin fork and pinned Bullet source. It consumes a full mesh-indexed component-space animated pose and returns the complete simulated pose, including descendants and mode-2 local-position handling under a physical parent. It does not convert PMX joints into VRM0 spring chains. It uses fixed 30 Hz steps, 48 solver iterations and at most one step per rendered frame, long-frame reset, scale checks, and finite/index validation. Unsupported joint types fail explicitly.
 
 The current host fork uses Bullet 3.07 Spring2, with authored angular stiffness rather than the former motor's length-scale-squared conversion. Both joint damping coefficients are `.5`; zero-stiffness axes retain velocity damping. Directly linked pairs are excluded from contact while all other PMX masks remain active. The original physical metadata is unchanged. See the host `PHYSICS.md` for dependency preparation, measured improvements and remaining strict-residual limits.
 
@@ -67,8 +67,15 @@ updated on frames without a physics step. The native solver, collisions and
 Mode2 position alignment retain current-world snapshots.
 
 Dynamic output bones use previous/current native snapshots for display-only
-interpolation, one fixed step (1/60 second) behind. Interpolated poses never feed
+interpolation, one fixed step (1/30 second) behind. Interpolated poses never feed
 Mode2 alignment or native contacts. Reset invalidates display history; a zero-time
 evaluation retains the display phase. Native regression tests cover multiple
 render rates, a clipped/variable-delta sequence, zero-step display motion,
 unchanged native trajectories and current-parent Mode2 alignment.
+
+
+## Collision coverage and release scope
+
+The importer fits convex surfaces only to dynamic PMX attachments using vertices with a dominant weight of at least 0.5. Mode 0 bodies retain their authored shapes: partial skin samples must not shrink shoulder/neck coverage. Old stored Mode 0 surface points are also ignored at initialization. Body masks and source metadata remain intact. Contact relief returns toward authored angular limits after contact ends; incompatible locked constraints are calibrated only after proving a conflict. See the host [physics documentation](https://github.com/furinasdog/HonkaiVTuber/blob/main/doc/PHYSICS.md) for the shared native dependency and tradeoffs.
+
+Run the host's `VRM4U.PMX` automation suite after changes. Passing rigid-body and bone tests does not prove that every skinned triangle is collision-free; fast head movement, concave geometry and mixed weights still need visual checks. This fork does not include character assets or provide a standalone application.

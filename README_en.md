@@ -1,3 +1,7 @@
+# HonkaiRendering integration fork
+
+This branch targets UE 5.8 on Windows x64. See [fork setup and limits](HONKAI_RENDERING.md), [contributing](CONTRIBUTING.md), and [fork issues](https://github.com/furinasdog/VRM4U/issues). Keep the matching Assimp binaries; do not replace them with upstream release DLLs. Upstream authorship and licenses are retained. The historical upstream documentation follows.
+
 # VRM4U
 Runtime VRM loader for UnrealEngine4
 
