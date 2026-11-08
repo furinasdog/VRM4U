@@ -1229,6 +1229,8 @@ bool VRMConverter::ConvertTextureAndMaterial(UVrmAssetListObject *vrmAssetList) 
 						if (Options::Get().IsPMXModel()) {
 							const auto pmx = ReadPmxMaterialProperties(aiMat);
 							const FLinearColor color = pmx.Color;
+							LocalVectorParameterSet(dm, TEXT("mmd_SpecularColor"), pmx.SpecularColor);
+							LocalScalarParameterSet(dm, TEXT("mmd_Shininess"), pmx.Shininess);
 							LocalScalarParameterSet(dm, TEXT("mmd_EdgeEnabled"), pmx.bEdgeEnabled ? 1.f : 0.f);
 							LocalScalarParameterSet(dm, TEXT("mmd_EdgeSize"), pmx.EdgeSize);
 							LocalVectorParameterSet(dm, TEXT("mmd_EdgeColor"), pmx.EdgeColor);

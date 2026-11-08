@@ -7,6 +7,8 @@ struct FPmxMaterialProperties
 {
 	FLinearColor Color = FLinearColor::White;
 	FLinearColor EdgeColor = FLinearColor::Black;
+	FLinearColor SpecularColor = FLinearColor::Black;
+	float Shininess = 32.f;
 	float EdgeSize = 0.f;
 	int SphereMode = 0;
 	bool bTwoSided = false;
@@ -22,6 +24,11 @@ inline FPmxMaterialProperties ReadPmxMaterialProperties(const aiMaterial& Materi
 	Material.Get(AI_MATKEY_COLOR_DIFFUSE, Diffuse);
 	Material.Get(AI_MATKEY_OPACITY, Opacity);
 	Result.Color = FLinearColor(Diffuse.r, Diffuse.g, Diffuse.b, FMath::Clamp(Opacity, 0.f, 1.f));
+	aiColor3D Specular(0.f, 0.f, 0.f);
+	Material.Get(AI_MATKEY_COLOR_SPECULAR, Specular);
+	Result.SpecularColor = FLinearColor(Specular.r, Specular.g, Specular.b);
+	// The existing Assimp MMD importer stores the PMX exponent in this key.
+	Material.Get(AI_MATKEY_SHININESS_STRENGTH, Result.Shininess);
 	Material.Get(AI_MATKEY_TWOSIDED, Result.bTwoSided);
 	Material.Get("$mat.mmd.edgeEnabled", 0, 0, Result.bEdgeEnabled);
 	Material.Get("$mat.mmd.toonEnabled", 0, 0, Result.bToonEnabled);

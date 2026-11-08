@@ -11,6 +11,13 @@ bool FVrmPmxMaterialTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Legacy imports retain fallback toon lighting"), ReadPmxMaterialProperties(Material).bToonEnabled);
 	TestEqual(TEXT("Missing properties stay white and opaque"), ReadPmxMaterialProperties(Material).Color, FLinearColor::White);
 	aiColor3D Diffuse(0.2f, 0.4f, 0.6f);
+	TestEqual(TEXT("Missing specular stays disabled"), ReadPmxMaterialProperties(Material).SpecularColor, FLinearColor::Black);
+	aiColor3D Specular(.3f, .2f, .1f);
+	float Shininess = 48.f;
+	Material.AddProperty(&Specular, 1, AI_MATKEY_COLOR_SPECULAR);
+	Material.AddProperty(&Shininess, 1, AI_MATKEY_SHININESS_STRENGTH);
+	TestEqual(TEXT("Authored colored specular survives"), ReadPmxMaterialProperties(Material).SpecularColor, FLinearColor(.3f, .2f, .1f));
+	TestEqual(TEXT("PMX exponent uses the importer key"), ReadPmxMaterialProperties(Material).Shininess, Shininess);
 	Material.AddProperty(&Diffuse, 1, AI_MATKEY_COLOR_DIFFUSE);
 	for (float Opacity : {0.f, 0.5f, 1.f})
 	{

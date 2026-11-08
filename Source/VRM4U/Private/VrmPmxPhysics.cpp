@@ -29,8 +29,23 @@ static_assert(sizeof(MMDBulletPhysics::NativeConfig) == 36, "UMT configuration A
 namespace
 {
     // Keep the MMD fixed step; long frames are bounded/reset rather than fed into Bullet.
-    constexpr float FixedStep = 1.f / 60.f;
-    constexpr int32 MaximumSteps = 8;
+    // Leave headroom for rendering instead of accumulating expensive catch-up steps.
+    constexpr float FixedStep = 1.f / 30.f;
+    constexpr int32 SolverIterations = 64;
+    // Drop excess elapsed time instead of turning one missed deadline into several costly steps.
+    constexpr int32 MaximumSteps = 1;
+
+#if WITH_DEV_AUTOMATION_TESTS
+    bool QaStepSettings(const TCHAR* Command, float& Step, int32& Iterations)
+    {
+        float Hz = 1.f / Step;
+        FParse::Value(Command, TEXT("PmxQaHz="), Hz);
+        FParse::Value(Command, TEXT("PmxQaIterations="), Iterations);
+        if (!FMath::IsFinite(Hz) || Hz < 15.f || Hz > 120.f || Iterations < 8 || Iterations > 160) return false;
+        Step = 1.f / Hz;
+        return true;
+    }
+#endif
 
     bool ValidTransform(const FTransform& T)
     {
@@ -128,6 +143,8 @@ struct FVrmPmxPhysics::FImpl
     FTransform PreviousComponentToWorld;
     float ComponentScale = 1;
     float Accumulator = 0;
+    float StepSeconds = FixedStep;
+    int32 Iterations = SolverIterations;
 #if WITH_VRM4U_PMX_BULLET
     MMDBulletPhysics::NativeContext* Context = nullptr;
     ~FImpl()
@@ -241,8 +258,8 @@ struct FVrmPmxPhysics::FImpl
         TArray<uint8> Bytes;
         const uint32 Header[] = {1, 0x01020304, uint32(Bodies.Num()), uint32(Parents.Num()), uint32(NativeJoints.Num()),
             sizeof(MMDBulletPhysics::RigidBodySimulationData), sizeof(MMDBulletPhysics::NativeJointData), sizeof(MMDBulletPhysics::NativeConfig),
-            16, 1, 80, 1, MaximumSteps, uint32(QaEventsMaxBytes), uint32(QaEventsMaxSeconds), 0};
-        const float Scalars[] = {FixedStep, ComponentScale, 0, -9.8f, 0};
+            16, 1, uint32(Iterations), 1, MaximumSteps, uint32(QaEventsMaxBytes), uint32(QaEventsMaxSeconds), 0};
+        const float Scalars[] = {StepSeconds, ComponentScale, 0, -9.8f, 0};
         QaEventsAppend(Bytes, Header, sizeof(Header)); QaEventsAppend(Bytes, Scalars, sizeof(Scalars));
         QaEventsAppend(Bytes, &Config, sizeof(Config));
         QaEventsAppend(Bytes, NativeBodies.GetData(), NativeBodies.Num() * sizeof(MMDBulletPhysics::RigidBodySimulationData));
@@ -336,8 +353,8 @@ struct FVrmPmxPhysics::FImpl
         const ANSICHAR Magic[8] = {'P','M','X','U','E','Q','0','1'};
         // Header flags: component matrices use native reflected basis/metres; final body snapshot is world-space after Mode2 correction.
         const uint32 Header[] = {1, 0x01020304, uint32(Bodies.Num()), uint32(Parents.Num()), uint32(QaNativeJoints.Num()),
-            sizeof(MMDBulletPhysics::RigidBodySimulationData), sizeof(MMDBulletPhysics::NativeJointData), sizeof(MMDBulletPhysics::NativeConfig), 16, 1, 80, MaximumSteps};
-        const float Scalars[] = {FixedStep, ComponentScale};
+            sizeof(MMDBulletPhysics::RigidBodySimulationData), sizeof(MMDBulletPhysics::NativeJointData), sizeof(MMDBulletPhysics::NativeConfig), 16, 1, uint32(Iterations), MaximumSteps};
+        const float Scalars[] = {StepSeconds, ComponentScale};
         Append(Magic, sizeof(Magic)); Append(Header, sizeof(Header)); Append(Scalars, sizeof(Scalars)); Append(&QaElapsed, sizeof(QaElapsed));
         Append(&QaConfig, sizeof(QaConfig));
         Append(QaNativeBodies.GetData(), QaNativeBodies.Num() * sizeof(MMDBulletPhysics::RigidBodySimulationData));
@@ -434,6 +451,8 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
     if (!ValidateData(Data, Error)) return false;
     TUniquePtr<FImpl> State = MakeUnique<FImpl>();
 #if WITH_DEV_AUTOMATION_TESTS
+    if (!QaStepSettings(FCommandLine::Get(), State->StepSeconds, State->Iterations))
+    { Error = TEXT("Invalid PMX QA rate or iteration count."); return false; }
     State->bQaTrace = FParse::Param(FCommandLine::Get(), TEXT("PmxQaTrace"));
     FParse::Value(FCommandLine::Get(), TEXT("PmxQaEvents="), State->QaEventsPath);
     if (!State->QaEventsPath.IsEmpty() && (FPaths::IsRelative(State->QaEventsPath) || !State->QaEventsPath.EndsWith(TEXT(".bin"))))
@@ -528,8 +547,11 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
         }
     }
     const float Gravity[3] = {0, -9.8f, 0};
-    State->Context = MMDBulletPhysicsCreate(Gravity, 80, 1, FixedStep);
+    State->Context = MMDBulletPhysicsCreate(Gravity, State->Iterations, 1, State->StepSeconds);
     if (!State->Context) { Error = TEXT("Cannot create PMX physics context."); return false; }
+#if WITH_DEV_AUTOMATION_TESTS
+    UE_LOG(LogTemp, Display, TEXT("PMX_QA_SETTINGS hz=%.3f iterations=%d"), 1.f / State->StepSeconds, State->Iterations);
+#endif
     MMDBulletPhysics::NativeConfig Config{};
     Config.groundNormal[1] = 1;
     Config.mmdUnitToUnityUnit = LengthScale;
@@ -605,18 +627,19 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
         return bReset;
     }
     const TArray<FTransform> Animated = BoneComponentPose;
+    const float StepSeconds = Impl->StepSeconds;
     const float AccumulatorBefore = Impl->Accumulator;
-    const float AcceptedDelta = FMath::Min(DeltaSeconds, FixedStep * MaximumSteps);
+    const float AcceptedDelta = FMath::Min(DeltaSeconds, StepSeconds * MaximumSteps);
     Impl->Accumulator += AcceptedDelta;
-    const int32 Steps = FMath::Min(FMath::FloorToInt(Impl->Accumulator / FixedStep), MaximumSteps);
-    Impl->Accumulator -= Steps * FixedStep;
+    const int32 Steps = FMath::Min(FMath::FloorToInt(Impl->Accumulator / StepSeconds), MaximumSteps);
+    Impl->Accumulator -= Steps * StepSeconds;
     TArray<float> KinematicMatrices;
     KinematicMatrices.SetNumUninitialized(Impl->KinematicIndices.Num() * 16);
     for (int32 Step = 0; Step < Steps; ++Step)
     {
         // Sample animation at the actual fixed-step time, including a partially accumulated frame.
         const float Alpha = AcceptedDelta > SMALL_NUMBER
-            ? FMath::Clamp(((Step + 1) * FixedStep - AccumulatorBefore) / AcceptedDelta, 0.f, 1.f) : 1.f;
+            ? FMath::Clamp(((Step + 1) * StepSeconds - AccumulatorBefore) / AcceptedDelta, 0.f, 1.f) : 1.f;
         for (int32 K = 0; K < Impl->KinematicIndices.Num(); ++K)
         {
             const int32 I = Impl->KinematicIndices[K];
@@ -634,9 +657,9 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
 #endif
         MMDBulletPhysicsSetRigidBodyTransforms(Impl->Context, Impl->KinematicIndices.Num(), KinematicMatrices.GetData(), Impl->KinematicIndices.GetData(), false);
 #if WITH_DEV_AUTOMATION_TESTS
-        Impl->QaEventsStep(FixedStep);
+        Impl->QaEventsStep(StepSeconds);
 #endif
-        MMDBulletPhysicsStepSimulation(Impl->Context, FixedStep);
+        MMDBulletPhysicsStepSimulation(Impl->Context, StepSeconds);
         TArray<FTransform> Dynamic;
         if (!Impl->ReadBodies(Impl->DynamicIndices, Dynamic))
         { Reset(Animated, ComponentToWorld); Error = TEXT("Non-finite PMX body result; simulation reset."); return false; }
@@ -692,7 +715,7 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
     if (Impl->bRenderHistory && Impl->RenderPreviousBodies.Num() == Dynamic.Num())
     {
         // Interpolate display only, one fixed step behind. Native contacts and Mode2 used the current snapshot above.
-        const float RenderAlpha = FMath::Clamp(Impl->Accumulator / FixedStep, 0.f, 1.f);
+        const float RenderAlpha = FMath::Clamp(Impl->Accumulator / StepSeconds, 0.f, 1.f);
         Driven.Reset();
         for (int32 K = 0; K < Impl->DynamicIndices.Num(); ++K)
         {
@@ -838,6 +861,28 @@ bool FVrmPmxCollisionGroupTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVrmPmxQaStepSettingsTest, "VRM4U.PMX.QaStepSettings",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVrmPmxQaStepSettingsTest::RunTest(const FString&)
+{
+    float Step = FixedStep;
+    int32 Iterations = SolverIterations;
+    TestTrue(TEXT("No override retains defaults"), QaStepSettings(TEXT(""), Step, Iterations));
+    TestEqual(TEXT("Default timestep is unchanged"), Step, FixedStep);
+    TestEqual(TEXT("Default iterations are unchanged"), Iterations, SolverIterations);
+    TestTrue(TEXT("QA can select a measured rate and budget"),
+        QaStepSettings(TEXT("-PmxQaHz=30 -PmxQaIterations=64"), Step, Iterations));
+    TestEqual(TEXT("Actual step is 30 Hz"), Step, 1.f / 30.f);
+    TestEqual(TEXT("Actual solver budget is retained"), Iterations, 64);
+    for (const TCHAR* Invalid : {TEXT("-PmxQaHz=0"), TEXT("-PmxQaHz=121"),
+        TEXT("-PmxQaHz=nan"), TEXT("-PmxQaIterations=0"), TEXT("-PmxQaIterations=161")})
+    {
+        Step = FixedStep; Iterations = SolverIterations;
+        TestFalse(FString(TEXT("Invalid QA settings rejected: ")) + Invalid, QaStepSettings(Invalid, Step, Iterations));
+    }
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVrmPmxSubstepTimingTest, "VRM4U.PMX.SubstepTiming",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FVrmPmxSubstepTimingTest::RunTest(const FString&)
@@ -911,7 +956,7 @@ bool FVrmPmxRenderInterpolationTest::RunTest(const FString&)
     int32 Completed=0, MovingZeroFrames=0;
     double PreviousOutput=100;
     TArray<FTransform> Native, PreviousNative;
-    for (int32 Frame=0;Completed<60 && Frame<200;++Frame)
+    for (int32 Frame=0;Completed<60 && Frame<400;++Frame)
     {
         const int32 Steps=FMath::FloorToInt((HighRate.Impl->Accumulator + 1.f/144.f)/FixedStep);
         auto Pose=Animated;
@@ -924,6 +969,7 @@ bool FVrmPmxRenderInterpolationTest::RunTest(const FString&)
         }
         Completed+=Steps; PreviousOutput=Pose[1].GetLocation().Z; PreviousNative=Native;
     }
+    TestEqual(TEXT("High-rate playback completes sixty physics steps"),Completed,60);
     TestTrue(TEXT("High-rate frames interpolate the visible body while physics is idle"),MovingZeroFrames>50);
     for (int32 Step=0;Step<Completed;++Step)
     {
