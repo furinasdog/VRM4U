@@ -155,12 +155,9 @@ namespace {
             if (Vertices.Num() != int32(Section->mNumVertices)) continue;
             TArray<int32> Dominant; Dominant.Init(INDEX_NONE, Vertices.Num());
             TArray<float> Largest; Largest.Init(0.f, Vertices.Num());
-            bool HasDynamicSurface = false;
             for (uint32 K = 0; K < Section->mNumBones; ++K) {
                 const auto* SourceBone = Section->mBones[K];
                 const int32 Bone = Mesh->GetRefSkeleton().FindBoneIndex(FName(UTF8_TO_TCHAR(SourceBone->mName.C_Str())));
-                if (SourceBone->mNumWeights > 0) if (const auto* Bodies = BoneBodies.Find(Bone))
-                    for (int32 I : *Bodies) HasDynamicSurface |= Data->RigidBodies[I].Mode != 0;
                 for (uint32 W = 0; W < SourceBone->mNumWeights; ++W) {
                     const auto& Weight = SourceBone->mWeights[W];
                     if (Largest.IsValidIndex(Weight.mVertexId) && Weight.mWeight > Largest[Weight.mVertexId]) {
@@ -176,8 +173,8 @@ namespace {
                 int32 Nearest = INDEX_NONE; double Distance = TNumericLimits<double>::Max();
                 for (int32 I : *Candidates) {
                     const auto& Body = Data->RigidBodies[I];
-                    // Hair/cloth roots share skin bones; they must not inflate the skin's collision hull.
-                    if (HasDynamicSurface && Body.Mode == 0) continue;
+                    // Partial skin samples can shrink authored body coverage; only fit dynamic attachments.
+                    if (Body.Mode == 0) continue;
                     // Assign overlapping proxies on one bone a disjoint set of surface samples.
                     FVector Local = Frames[I].InverseTransformPosition(Position) / (100.f * Data->ModelScale);
                     double D = 0;

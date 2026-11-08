@@ -592,7 +592,7 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
         FFileHelper::SaveStringToFile(Surface, *(State->QaDumpPath + TEXT(".surface.csv")));
     }
 #endif
-    for (int32 I = 0; I < Hulls.Num(); ++I) if (Hulls[I].Num() >= 12) {
+    for (int32 I = 0; I < Hulls.Num(); ++I) if (Hulls[I].Num() >= 12 && State->Bodies[I].Mode != 0) {
         if (!MMDBulletPhysicsSetCollisionHull(State->Context, I, Hulls[I].GetData(), Hulls[I].Num() / 3))
         { Error = TEXT("Cannot initialize PMX collision surface."); return false; }
         ++HullCount;
@@ -1233,15 +1233,25 @@ bool FVrmPmxBulletTest::RunTest(const FString& Parameters)
         if (!Physics.Simulate(1.f / 60.f, World, Pose, Error)) { AddError(Error); return false; }
     }
     TestTrue(TEXT("PMX shapes collide at their authored scaled dimensions"), FMath::IsNearlyEqual(Pose[1].GetLocation().Z, 15., .5));
-    for (double X : {-50., 50.}) for (double Y : {-50., 50.}) for (double Z : {-20., 20.}) {
+    // Partial skin samples must not shrink the authored body collider.
+    for (double X : {-1., 1.}) for (double Y : {-1., 1.}) for (double Z : {-1., 1.}) {
         Data->CollisionVertices.Add(FVector(X, Y, Z)); Data->CollisionVertexBodies.Add(1);
     }
-    TestTrue(TEXT("Skin surface initializes under a rotated translated scaled component"), Physics.Initialize(*Data, Skeleton->GetReferenceSkeleton(), ScaledWorld, Error));
+    TestTrue(TEXT("Partial skin surface initializes under a rotated translated scaled component"), Physics.Initialize(*Data, Skeleton->GetReferenceSkeleton(), ScaledWorld, Error));
     for (int32 I = 0; I < 180; ++I) {
         Pose = Animated;
         if (!Physics.Simulate(1.f / 60.f, ScaledWorld, Pose, Error)) { AddError(Error); return false; }
     }
-    TestTrue(TEXT("Skin proxy uses component centimetres and actor scale exactly once"), FMath::IsNearlyEqual(Pose[1].GetLocation().Z, 25., .5));
+    TestTrue(TEXT("Partial skin points preserve authored collider coverage"), FMath::IsNearlyEqual(Pose[1].GetLocation().Z, 15., .5));
+    for (double X : {-20., 20.}) for (double Y : {-20., 20.}) for (double Z : {-20., 20.}) {
+        Data->CollisionVertices.Add(FVector(X + 10., Y, Z + 100.)); Data->CollisionVertexBodies.Add(0);
+    }
+    TestTrue(TEXT("Dynamic surface initializes with component scale"), Physics.Initialize(*Data, Skeleton->GetReferenceSkeleton(), ScaledWorld, Error));
+    for (int32 I = 0; I < 180; ++I) {
+        Pose = Animated;
+        if (!Physics.Simulate(1.f / 60.f, ScaledWorld, Pose, Error)) { AddError(Error); return false; }
+    }
+    TestTrue(TEXT("Dynamic hull uses component centimetres and actor scale exactly once"), FMath::IsNearlyEqual(Pose[1].GetLocation().Z, 30., .5));
     Data->CollisionVertexBodies[0] = INDEX_NONE;
     TestFalse(TEXT("Invalid skin body reference is rejected before native access"), Physics.Initialize(*Data, Skeleton->GetReferenceSkeleton(), World, Error));
     Data->CollisionVertexBodies[0] = 1;
