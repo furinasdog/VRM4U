@@ -31,7 +31,7 @@ namespace
     // Keep the MMD fixed step; long frames are bounded/reset rather than fed into Bullet.
     // Leave headroom for rendering instead of accumulating expensive catch-up steps.
     constexpr float FixedStep = 1.f / 30.f;
-    constexpr int32 SolverIterations = 64;
+    constexpr int32 SolverIterations = 48;
     // Drop excess elapsed time instead of turning one missed deadline into several costly steps.
     constexpr int32 MaximumSteps = 1;
 
@@ -107,6 +107,11 @@ namespace
         if (!FMath::IsFinite(Data.ModelScale) || Data.ModelScale <= SMALL_NUMBER
             || Data.RigidBodies.IsEmpty() || Data.RigidBodies.Num() > 16384 || Data.Joints.Num() > 32768)
         { Error = TEXT("Invalid PMX physics scale or object count."); return false; }
+        if (Data.CollisionVertices.Num() != Data.CollisionVertexBodies.Num() || Data.CollisionVertices.Num() > 2000000)
+        { Error = TEXT("Invalid PMX collision surface count."); return false; }
+        for (int32 I = 0; I < Data.CollisionVertices.Num(); ++I)
+            if (Data.CollisionVertices[I].ContainsNaN() || !Data.RigidBodies.IsValidIndex(Data.CollisionVertexBodies[I]))
+            { Error = TEXT("Invalid PMX collision surface vertex."); return false; }
         for (const auto& B : Data.RigidBodies)
         {
             if (B.Group < 0 || B.Group > 15 || B.CollisionMask < 0 || B.CollisionMask > 65535
@@ -569,6 +574,30 @@ bool FVrmPmxPhysics::Initialize(const UVrmPmxPhysicsData& Data, const FReference
     }
 #endif
     MMDBulletPhysicsBuildRigidBodies(State->Context, NativeBodies.GetData(), NativeBodies.Num());
+    TArray<TArray<float>> Hulls;
+    Hulls.SetNum(NativeBodies.Num());
+    for (int32 V = 0; V < Data.CollisionVertices.Num(); ++V) {
+        const int32 Body = Data.CollisionVertexBodies[V];
+        const FVector Local = SwapYZ(State->BodyRest[Body].InverseTransformPosition(Data.CollisionVertices[V]))
+            * (State->ComponentScale / 100.f);
+        auto& Points = Hulls[Body];
+        Points.Add(float(Local.X)); Points.Add(float(Local.Y)); Points.Add(float(Local.Z));
+    }
+    int32 HullCount = 0;
+#if WITH_DEV_AUTOMATION_TESTS
+    if (!State->QaDumpPath.IsEmpty()) {
+        FString Surface = TEXT("body,x_m,y_m,z_m\n");
+        for (int32 I = 0; I < Hulls.Num(); ++I) for (int32 P = 0; P < Hulls[I].Num(); P += 3)
+            Surface += FString::Printf(TEXT("%d,%.9g,%.9g,%.9g\n"), I, Hulls[I][P], Hulls[I][P+1], Hulls[I][P+2]);
+        FFileHelper::SaveStringToFile(Surface, *(State->QaDumpPath + TEXT(".surface.csv")));
+    }
+#endif
+    for (int32 I = 0; I < Hulls.Num(); ++I) if (Hulls[I].Num() >= 12) {
+        if (!MMDBulletPhysicsSetCollisionHull(State->Context, I, Hulls[I].GetData(), Hulls[I].Num() / 3))
+        { Error = TEXT("Cannot initialize PMX collision surface."); return false; }
+        ++HullCount;
+    }
+    UE_LOG(LogTemp, Display, TEXT("PMX_COLLISION_SURFACE surfaces=%d vertices=%d"), HullCount, Data.CollisionVertices.Num());
     MMDBulletPhysicsBuildJoints(State->Context, NativeJoints.GetData(), NativeJoints.Num());
 #if WITH_DEV_AUTOMATION_TESTS
     State->QaEventsStart(NativeBodies, NativeJoints, Config, RefPose, ComponentToWorld);
@@ -1204,6 +1233,18 @@ bool FVrmPmxBulletTest::RunTest(const FString& Parameters)
         if (!Physics.Simulate(1.f / 60.f, World, Pose, Error)) { AddError(Error); return false; }
     }
     TestTrue(TEXT("PMX shapes collide at their authored scaled dimensions"), FMath::IsNearlyEqual(Pose[1].GetLocation().Z, 15., .5));
+    for (double X : {-50., 50.}) for (double Y : {-50., 50.}) for (double Z : {-20., 20.}) {
+        Data->CollisionVertices.Add(FVector(X, Y, Z)); Data->CollisionVertexBodies.Add(1);
+    }
+    TestTrue(TEXT("Skin surface initializes under a rotated translated scaled component"), Physics.Initialize(*Data, Skeleton->GetReferenceSkeleton(), ScaledWorld, Error));
+    for (int32 I = 0; I < 180; ++I) {
+        Pose = Animated;
+        if (!Physics.Simulate(1.f / 60.f, ScaledWorld, Pose, Error)) { AddError(Error); return false; }
+    }
+    TestTrue(TEXT("Skin proxy uses component centimetres and actor scale exactly once"), FMath::IsNearlyEqual(Pose[1].GetLocation().Z, 25., .5));
+    Data->CollisionVertexBodies[0] = INDEX_NONE;
+    TestFalse(TEXT("Invalid skin body reference is rejected before native access"), Physics.Initialize(*Data, Skeleton->GetReferenceSkeleton(), World, Error));
+    Data->CollisionVertexBodies[0] = 1;
     Data->RigidBodies[0].CollisionMask = 1 << 1;
     TestTrue(TEXT("PMX raw mask initializes with floor group bit disabled"), Physics.Initialize(*Data, Skeleton->GetReferenceSkeleton(), World, Error));
     for (int32 I = 0; I < 180; ++I)

@@ -133,6 +133,71 @@ namespace {
         Asset->PmxPhysicsData = Data;
     }
 
+    static void PersistPmxCollisionGeometry(UVrmPmxPhysicsData* Data, USkeletalMesh* Mesh,
+        const aiScene* Scene, const FReturnedData& MeshData) {
+        if (!Data || !Mesh || !Scene || MeshData.meshInfo.Num() != int32(Scene->mNumMeshes)) return;
+        TMap<int32, TArray<int32>> BoneBodies;
+        TArray<FTransform> Frames;
+        for (int32 I = 0; I < Data->RigidBodies.Num(); ++I) {
+            const auto& Body = Data->RigidBodies[I];
+            const int32 Bone = Mesh->GetRefSkeleton().FindBoneIndex(Body.BoneName);
+            if (Bone != INDEX_NONE) BoneBodies.FindOrAdd(Bone).Add(I);
+            const auto& R = Body.Rotation;
+            const FQuat Rotation = FQuat(FVector::ZAxisVector, R.Y) * FQuat(FVector::XAxisVector, R.X) * FQuat(FVector::YAxisVector, -R.Z);
+            Frames.Add(FTransform(Rotation, FVector(Body.Position.X, -Body.Position.Z, Body.Position.Y) * (100.f * Data->ModelScale)));
+        }
+        TArray<TSet<FIntVector>> Seen;
+        Seen.SetNum(Data->RigidBodies.Num());
+        // Render buffers are populated asynchronously; use the same source weights and bind vertices.
+        for (uint32 M = 0; M < Scene->mNumMeshes; ++M) {
+            const auto* Section = Scene->mMeshes[M];
+            const auto& Vertices = MeshData.meshInfo[M].Vertices;
+            if (Vertices.Num() != int32(Section->mNumVertices)) continue;
+            TArray<int32> Dominant; Dominant.Init(INDEX_NONE, Vertices.Num());
+            TArray<float> Largest; Largest.Init(0.f, Vertices.Num());
+            bool HasDynamicSurface = false;
+            for (uint32 K = 0; K < Section->mNumBones; ++K) {
+                const auto* SourceBone = Section->mBones[K];
+                const int32 Bone = Mesh->GetRefSkeleton().FindBoneIndex(FName(UTF8_TO_TCHAR(SourceBone->mName.C_Str())));
+                if (SourceBone->mNumWeights > 0) if (const auto* Bodies = BoneBodies.Find(Bone))
+                    for (int32 I : *Bodies) HasDynamicSurface |= Data->RigidBodies[I].Mode != 0;
+                for (uint32 W = 0; W < SourceBone->mNumWeights; ++W) {
+                    const auto& Weight = SourceBone->mWeights[W];
+                    if (Largest.IsValidIndex(Weight.mVertexId) && Weight.mWeight > Largest[Weight.mVertexId]) {
+                        Largest[Weight.mVertexId] = Weight.mWeight; Dominant[Weight.mVertexId] = Bone;
+                    }
+                }
+            }
+            for (int32 V = 0; V < Vertices.Num(); ++V) {
+                const auto* Candidates = BoneBodies.Find(Dominant[V]);
+                if (!Candidates || Largest[V] < .5f) continue;
+                const FVector Position = FVector(Vertices[V].X, -Vertices[V].Z, Vertices[V].Y) * (100.f * Data->ModelScale);
+                if (Position.ContainsNaN()) continue;
+                int32 Nearest = INDEX_NONE; double Distance = TNumericLimits<double>::Max();
+                for (int32 I : *Candidates) {
+                    const auto& Body = Data->RigidBodies[I];
+                    // Hair/cloth roots share skin bones; they must not inflate the skin's collision hull.
+                    if (HasDynamicSurface && Body.Mode == 0) continue;
+                    // Assign overlapping proxies on one bone a disjoint set of surface samples.
+                    FVector Local = Frames[I].InverseTransformPosition(Position) / (100.f * Data->ModelScale);
+                    double D = 0;
+                    if (Body.Shape == 2) Local.Z -= FMath::Clamp(Local.Z, -Body.Size.Y * .5, Body.Size.Y * .5);
+                    if (Body.Shape == 1) {
+                        const FVector Q = Local.GetAbs() - FVector(Body.Size.X, Body.Size.Z, Body.Size.Y);
+                        D = FVector(FMath::Max(0., Q.X), FMath::Max(0., Q.Y), FMath::Max(0., Q.Z)).Size()
+                            + FMath::Min(0., Q.GetMax());
+                    } else D = Local.Size() - Body.Size.X;
+                    if (FMath::Abs(D) < Distance) { Distance = FMath::Abs(D); Nearest = I; }
+                }
+                if (Nearest == INDEX_NONE) continue;
+                const FIntVector Cell(FMath::RoundToInt(Position.X * 20), FMath::RoundToInt(Position.Y * 20), FMath::RoundToInt(Position.Z * 20));
+                if (Seen[Nearest].Contains(Cell)) continue;
+                Seen[Nearest].Add(Cell);
+                Data->CollisionVertices.Add(Position); Data->CollisionVertexBodies.Add(Nearest);
+            }
+        }
+    }
+
 	static TArray<FTransform> PmxRefComponentPose(const FReferenceSkeleton& Ref) {
 		TArray<FTransform> Pose;
 		Pose.Reserve(Ref.GetNum());
@@ -2387,6 +2452,7 @@ bool VRMConverter::ConvertModel(UVrmAssetListObject *vrmAssetList) {
 		}
 	}
     PersistPmxPhysics(vrmAssetList, reinterpret_cast<VRM::VRMMetadata*>(aiData->mVRMMeta));
+    PersistPmxCollisionGeometry(vrmAssetList->PmxPhysicsData, sk, aiData, result);
 	if (aiData->mVRMMeta && Options::Get().IsSkipPhysics() == false) {
 		VRM::VRMMetadata* pmxMeta = reinterpret_cast<VRM::VRMMetadata*>(aiData->mVRMMeta);
 		if (pmxMeta->pmxRigidBodyNum > 0) {

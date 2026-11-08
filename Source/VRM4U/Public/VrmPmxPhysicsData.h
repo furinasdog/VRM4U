@@ -68,4 +68,7 @@ public:
     UPROPERTY() TArray<FVrmPmxRigidBodyData> RigidBodies;
     UPROPERTY() TArray<FVrmPmxJointData> Joints;
     UPROPERTY() TArray<FVrmPmxBoneTransformData> BoneTransforms;
+    // Imported mesh points in UE component centimetres; source PMX collider data stays intact.
+    UPROPERTY() TArray<FVector> CollisionVertices;
+    UPROPERTY() TArray<int32> CollisionVertexBodies;
 };
