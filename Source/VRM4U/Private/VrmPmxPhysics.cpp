@@ -139,6 +139,7 @@ struct FVrmPmxPhysics::FImpl
     TArray<FTransform> BodyOffsets, BodyRest, PreviousPose;
     // Display snapshots never participate in Mode2 alignment or solver feedback.
     TArray<FTransform> RenderPreviousBodies, RenderCurrentBodies;
+    TArray<FTransform> RenderPreviousAnimation, RenderCurrentAnimation;
     bool bRenderHistory = false;
     FTransform PreviousComponentToWorld;
     float ComponentScale = 1;
@@ -597,6 +598,9 @@ bool FVrmPmxPhysics::Reset(const TArray<FTransform>& BoneComponentPose, const FT
     Impl->PreviousPose = BoneComponentPose; Impl->PreviousComponentToWorld = ComponentToWorld; Impl->Accumulator = 0;
     if (!Impl->ReadBodies(Impl->DynamicIndices, Impl->RenderCurrentBodies)) return false;
     Impl->RenderPreviousBodies = Impl->RenderCurrentBodies; Impl->bRenderHistory = false;
+    Impl->RenderCurrentAnimation = BoneComponentPose;
+    for (FTransform& Bone : Impl->RenderCurrentAnimation) Bone *= ComponentToWorld;
+    Impl->RenderPreviousAnimation = Impl->RenderCurrentAnimation;
     return true;
 #else
     return false;
@@ -640,6 +644,11 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
         // Sample animation at the actual fixed-step time, including a partially accumulated frame.
         const float Alpha = AcceptedDelta > SMALL_NUMBER
             ? FMath::Clamp(((Step + 1) * StepSeconds - AccumulatorBefore) / AcceptedDelta, 0.f, 1.f) : 1.f;
+        Impl->RenderPreviousAnimation = MoveTemp(Impl->RenderCurrentAnimation);
+        Impl->RenderCurrentAnimation.SetNum(Animated.Num());
+        for (int32 Bone = 0; Bone < Animated.Num(); ++Bone)
+            Impl->RenderCurrentAnimation[Bone].Blend(Impl->PreviousPose[Bone] * Impl->PreviousComponentToWorld,
+                Animated[Bone] * ComponentToWorld, Alpha);
         for (int32 K = 0; K < Impl->KinematicIndices.Num(); ++K)
         {
             const int32 I = Impl->KinematicIndices[K];
@@ -714,8 +723,16 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
     }
     if (Impl->bRenderHistory && Impl->RenderPreviousBodies.Num() == Dynamic.Num())
     {
-        // Interpolate display only, one fixed step behind. Native contacts and Mode2 used the current snapshot above.
+        // Head/body animation must share the physical display time; native contacts and Mode2 remain current.
         const float RenderAlpha = FMath::Clamp(Impl->Accumulator / StepSeconds, 0.f, 1.f);
+        TArray<FTransform> DisplayAnimation;
+        DisplayAnimation.SetNum(Animated.Num());
+        for (int32 Bone = 0; Bone < Animated.Num(); ++Bone)
+        {
+            FTransform World;
+            World.Blend(Impl->RenderPreviousAnimation[Bone], Impl->RenderCurrentAnimation[Bone], RenderAlpha);
+            DisplayAnimation[Bone] = World.GetRelativeTransform(ComponentToWorld);
+        }
         Driven.Reset();
         for (int32 K = 0; K < Impl->DynamicIndices.Num(); ++K)
         {
@@ -729,7 +746,7 @@ bool FVrmPmxPhysics::Simulate(float DeltaSeconds, const FTransform& ComponentToW
         for (int32 Bone = 0; Bone < Animated.Num(); ++Bone)
         {
             const int32 Parent = Impl->Parents[Bone];
-            const FTransform Local = Parent == INDEX_NONE ? Animated[Bone] : Animated[Bone].GetRelativeTransform(Animated[Parent]);
+            const FTransform Local = Parent == INDEX_NONE ? DisplayAnimation[Bone] : DisplayAnimation[Bone].GetRelativeTransform(DisplayAnimation[Parent]);
             Resolved[Bone] = Parent == INDEX_NONE ? Local : Local * Resolved[Parent];
             if (const auto* Target = Driven.Find(Bone))
             {
@@ -985,6 +1002,53 @@ bool FVrmPmxRenderInterpolationTest::RunTest(const FString&)
     TestTrue(TEXT("Zero-time post-reset output is the current pose"),HighRate.Simulate(0,FTransform::Identity,Rest,Error) && Rest[1].Equals(Animated[1],.001));
 #else
     AddError(TEXT("Display interpolation regression requires native Bullet."));
+#endif
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVrmPmxDisplayAttachmentTest, "VRM4U.PMX.DisplayAttachment",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVrmPmxDisplayAttachmentTest::RunTest(const FString&)
+{
+#if WITH_VRM4U_PMX_BULLET
+    auto* Skeleton = NewObject<USkeleton>();
+    {
+        FReferenceSkeletonModifier Modifier(Skeleton);
+        Modifier.Add(FMeshBoneInfo(TEXT("root"), TEXT("root"), INDEX_NONE), FTransform::Identity);
+        Modifier.Add(FMeshBoneInfo(TEXT("head"), TEXT("head"), 0), FTransform(FVector(0, 0, 100)));
+        Modifier.Add(FMeshBoneInfo(TEXT("follower"), TEXT("follower"), 1), FTransform(FVector(20, 0, 0)));
+    }
+    auto* Data = NewObject<UVrmPmxPhysicsData>(); Data->ModelScale = .1f;
+    for (int32 I = 0; I < 2; ++I)
+    {
+        auto& B = Data->RigidBodies.AddDefaulted_GetRef();
+        B.BoneName = I ? TEXT("follower") : TEXT("head"); B.SourceBoneIndex = I + 1;
+        B.Mode = I; B.Shape = 0; B.Size = FVector(.2, 0, 0); B.Mass = 1;
+        B.Position = FVector(I * 2, 10, 0); B.CollisionMask = 0;
+    }
+    auto& Joint = Data->Joints.AddDefaulted_GetRef();
+    Joint.BodyA = 0; Joint.BodyB = 1; Joint.Position = FVector(0, 10, 0);
+    const FTransform Offset(FVector(20, 0, 0));
+    FString Error;
+    for (float Fps : {30.f, 60.f, 90.f, 144.f})
+    {
+        FVrmPmxPhysics Physics;
+        if (!Physics.Initialize(*Data, Skeleton->GetReferenceSkeleton(), FTransform::Identity, Error))
+        { AddError(Error); return false; }
+        double MaximumGap = 0;
+        for (int32 Frame = 0; Frame < 180; ++Frame)
+        {
+            const FTransform Head(FRotator(0, 0, 30 * FMath::Sin(Frame / Fps * 3)), FVector(0, 0, 100));
+            TArray<FTransform> Pose{FTransform::Identity, Head, Offset * Head};
+            if (!Physics.Simulate(1.f / Fps, FTransform::Identity, Pose, Error))
+            { AddError(Error); return false; }
+            if (Frame > 10) MaximumGap = FMath::Max(MaximumGap,
+                FVector::Distance(Pose[2].GetLocation(), (Offset * Pose[1]).GetLocation()));
+        }
+        TestTrue(FString::Printf(TEXT("%.0f FPS: animated head and physical follower share display time (gap %.6f cm)"), Fps, MaximumGap), MaximumGap < .04);
+    }
+#else
+    AddError(TEXT("Display attachment regression requires native Bullet."));
 #endif
     return true;
 }
